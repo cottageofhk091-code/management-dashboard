@@ -1,5 +1,5 @@
 import { PRODUCTS } from "@/lib/products";
-import { isSupabaseConfigured, supabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabase";
 
 export type AppLog = {
   id: number;
@@ -46,11 +46,24 @@ export async function getDashboardData(): Promise<DashboardData> {
     share: 0,
   }));
 
-  if (!isSupabaseConfigured) {
+  if (!isSupabaseAdminConfigured) {
     return {
       configured: false,
       error:
-        "NEXT_PUBLIC_SUPABASE_ANON_KEY が未設定です。.env.local に Publishable / anon キーを設定してください。",
+        "SUPABASE_SERVICE_ROLE_KEY が未設定です。サーバー側の読み取りには service_role キーが必要です。",
+      totalCount: 0,
+      todayCount: 0,
+      activeProductCount: PRODUCTS.length,
+      productUsage: emptyUsage,
+      recentLogs: [],
+    };
+  }
+
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return {
+      configured: false,
+      error: "SUPABASE_SERVICE_ROLE_KEY が未設定です。",
       totalCount: 0,
       todayCount: 0,
       activeProductCount: PRODUCTS.length,
@@ -62,18 +75,18 @@ export async function getDashboardData(): Promise<DashboardData> {
   const todayStart = startOfTodayJstIso();
 
   const [totalRes, todayRes, recentRes, ...productResults] = await Promise.all([
-    supabaseAdmin.from("app_logs").select("*", { count: "exact", head: true }),
-    supabaseAdmin
+    client.from("app_logs").select("*", { count: "exact", head: true }),
+    client
       .from("app_logs")
       .select("*", { count: "exact", head: true })
       .gte("created_at", todayStart),
-    supabaseAdmin
+    client
       .from("app_logs")
       .select("id, app_name, action_type, created_at")
       .order("created_at", { ascending: false })
       .limit(10),
     ...PRODUCTS.map((product) =>
-      supabaseAdmin
+      client
         .from("app_logs")
         .select("*", { count: "exact", head: true })
         .in("app_name", [...product.aliases]),

@@ -6,7 +6,7 @@ import {
   startOfTodayJst,
   type PeriodKey,
 } from "@/lib/period";
-import { isSupabaseConfigured, supabaseAdmin } from "@/lib/supabase";
+import { getSupabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabase";
 
 export type KpiPair = {
   today: number;
@@ -52,7 +52,7 @@ export type AnalyticsDashboard = {
     proMembers: KpiPair;
     members: KpiPair;
     revenue: KpiPair;
-    topSource: { name: string; share: number };
+    topSource: { name: string; share: number; todayShare: number; totalShare: number };
   };
   daily: DailyPoint[];
   sources: SourceRow[];
@@ -156,11 +156,19 @@ function countPair(
 }
 
 async function fetchAllRows(table: string): Promise<{ rows: Row[]; error: string | null }> {
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return {
+      rows: [],
+      error: "SUPABASE_SERVICE_ROLE_KEY が未設定です。",
+    };
+  }
+
   const rows: Row[] = [];
   let from = 0;
 
   for (;;) {
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await client
       .from(table)
       .select("*")
       .order("created_at", { ascending: false })
@@ -168,7 +176,7 @@ async function fetchAllRows(table: string): Promise<{ rows: Row[]; error: string
 
     if (error) {
       if (/created_at/i.test(error.message)) {
-        const fallback = await supabaseAdmin.from(table).select("*").range(from, from + PAGE_SIZE - 1);
+        const fallback = await client.from(table).select("*").range(from, from + PAGE_SIZE - 1);
         if (fallback.error) return { rows, error: `${table}: ${fallback.error.message}` };
         const chunk = (fallback.data as Row[] | null) ?? [];
         rows.push(...chunk);
@@ -193,7 +201,7 @@ export async function getAnalyticsDashboard(options: {
   period: PeriodKey;
 }): Promise<AnalyticsDashboard> {
   const empty: AnalyticsDashboard = {
-    configured: isSupabaseConfigured,
+    configured: isSupabaseAdminConfigured,
     error: null,
     kpis: {
       visits: { today: 0, total: 0, period: 0 },
@@ -202,7 +210,7 @@ export async function getAnalyticsDashboard(options: {
       proMembers: { today: 0, total: 0, period: 0 },
       members: { today: 0, total: 0, period: 0 },
       revenue: { today: 0, total: 0, period: 0 },
-      topSource: { name: "—", share: 0 },
+      topSource: { name: "—", share: 0, todayShare: 0, totalShare: 0 },
     },
     daily: [],
     sources: SOURCE_META.map((item) => ({
@@ -226,11 +234,11 @@ export async function getAnalyticsDashboard(options: {
     })),
   };
 
-  if (!isSupabaseConfigured) {
+  if (!isSupabaseAdminConfigured) {
     return {
       ...empty,
       error:
-        "NEXT_PUBLIC_SUPABASE_ANON_KEY が未設定です。.env.local に Publishable / anon キーを設定してください。",
+        "SUPABASE_SERVICE_ROLE_KEY が未設定です。サーバー側の読み取りには service_role キーが必要です。.env.local に設定してください。",
     };
   }
 
@@ -360,6 +368,24 @@ export async function getAnalyticsDashboard(options: {
   });
 
   const topSource = [...sources].sort((a, b) => b.visits - a.visits)[0];
+  const todayVisits = visits.filter((row) => inRange(rowDate(row), todayStart));
+  const countBySource = (rows: Row[]) => {
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const name = canonicalizeSource(str(row, "source_category", "source"));
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const todayCounts = countBySource(todayVisits);
+  const totalCounts = countBySource(visits);
+  const topName = topSource?.visits ? topSource.name : "—";
+  const todayShare =
+    todayVisits.length > 0
+      ? ((todayCounts.get(topName) ?? 0) / todayVisits.length) * 100
+      : 0;
+  const totalShare =
+    visits.length > 0 ? ((totalCounts.get(topName) ?? 0) / visits.length) * 100 : 0;
 
   const members: KpiPair = {
     today: freeKpi.today + proKpi.today,
@@ -460,16 +486,14 @@ export async function getAnalyticsDashboard(options: {
       members,
       revenue,
       topSource: {
-        name: topSource?.visits ? topSource.name : "—",
+        name: topName,
         share: topSource?.share ?? 0,
+        todayShare,
+        totalShare,
       },
     },
     daily,
     sources,
     products,
   };
-}
-
-export function formatYen(value: number) {
-  return `¥${new Intl.NumberFormat("ja-JP").format(value)}`;
 }

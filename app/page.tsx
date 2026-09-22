@@ -3,8 +3,10 @@ import {
   AlertTriangle,
   Banknote,
   BarChart3,
+  Crown,
   LayoutDashboard,
   PieChart,
+  Share2,
   Sparkles,
   UserPlus,
   Users,
@@ -13,7 +15,8 @@ import { DailyTrendChart } from "@/components/daily-trend-chart";
 import { DashboardFilters } from "@/components/dashboard-filters";
 import { DetailTabs } from "@/components/detail-tabs";
 import { SourcePieChart } from "@/components/source-pie-chart";
-import { formatYen, getAnalyticsDashboard } from "@/lib/metrics";
+import { formatYen } from "@/lib/format";
+import { getAnalyticsDashboard } from "@/lib/metrics";
 import { isPeriodKey, PERIODS, type PeriodKey } from "@/lib/period";
 import { canonicalAppId } from "@/lib/products";
 
@@ -21,6 +24,10 @@ export const dynamic = "force-dynamic";
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("ja-JP").format(value);
+}
+
+function formatPercent(value: number) {
+  return `${value.toFixed(1)}%`;
 }
 
 function firstParam(value: string | string[] | undefined) {
@@ -78,10 +85,10 @@ export default async function Home({
           <h2 className="text-sm font-semibold tracking-wide text-zinc-500">
             上段：総合 KPI
           </h2>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <KpiCard
               icon={<Users className="h-5 w-5" />}
-              label="訪問数"
+              label="訪問者数"
               value={formatNumber(analytics.kpis.visits.period)}
               today={formatNumber(analytics.kpis.visits.today)}
               total={formatNumber(analytics.kpis.visits.total)}
@@ -89,19 +96,27 @@ export default async function Home({
             />
             <KpiCard
               icon={<Sparkles className="h-5 w-5" />}
-              label="分析数"
+              label="分析実行数"
               value={formatNumber(analytics.kpis.analyses.period)}
               today={formatNumber(analytics.kpis.analyses.today)}
               total={formatNumber(analytics.kpis.analyses.total)}
-              hint="生成・分析ログ"
+              hint="app_logs / analytics_events"
             />
             <KpiCard
               icon={<UserPlus className="h-5 w-5" />}
-              label="会員数"
-              value={formatNumber(analytics.kpis.members.period)}
-              today={formatNumber(analytics.kpis.members.today)}
-              total={formatNumber(analytics.kpis.members.total)}
-              hint={`無料 ${formatNumber(analytics.kpis.freeMembers.period)} ／ 有料 ${formatNumber(analytics.kpis.proMembers.period)}`}
+              label="無料会員数"
+              value={formatNumber(analytics.kpis.freeMembers.period)}
+              today={formatNumber(analytics.kpis.freeMembers.today)}
+              total={formatNumber(analytics.kpis.freeMembers.total)}
+              hint="profiles（free）"
+            />
+            <KpiCard
+              icon={<Crown className="h-5 w-5" />}
+              label="有料会員数"
+              value={formatNumber(analytics.kpis.proMembers.period)}
+              today={formatNumber(analytics.kpis.proMembers.today)}
+              total={formatNumber(analytics.kpis.proMembers.total)}
+              hint="profiles（pro / paid）"
             />
             <KpiCard
               icon={<Banknote className="h-5 w-5" />}
@@ -110,6 +125,14 @@ export default async function Home({
               today={formatYen(analytics.kpis.revenue.today)}
               total={formatYen(analytics.kpis.revenue.total)}
               hint="決済履歴または Pro × ¥500"
+            />
+            <KpiCard
+              icon={<Share2 className="h-5 w-5" />}
+              label="最多流入元"
+              value={analytics.kpis.topSource.name}
+              today={formatPercent(analytics.kpis.topSource.todayShare)}
+              total={formatPercent(analytics.kpis.topSource.totalShare)}
+              hint={`期間内シェア ${formatPercent(analytics.kpis.topSource.share)}`}
             />
           </div>
         </section>
@@ -122,7 +145,7 @@ export default async function Home({
             <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm xl:col-span-3">
               <div className="mb-4 flex items-center gap-2">
                 <BarChart3 className="h-5 w-5 text-indigo-600" />
-                <h3 className="font-semibold">日次トレンド</h3>
+                <h3 className="font-semibold">日次アクセス・分析推移</h3>
               </div>
               <p className="mb-3 text-xs text-zinc-400">訪問数・分析数の推移</p>
               <DailyTrendChart data={analytics.daily} />
@@ -130,7 +153,7 @@ export default async function Home({
             <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm xl:col-span-2">
               <div className="mb-4 flex items-center gap-2">
                 <PieChart className="h-5 w-5 text-indigo-600" />
-                <h3 className="font-semibold">流入元シェア</h3>
+                <h3 className="font-semibold">流入元シェア・分布</h3>
               </div>
               <p className="mb-3 text-xs text-zinc-400">
                 X / note / Google / Yahoo / Direct 等
@@ -142,7 +165,7 @@ export default async function Home({
 
         <section className="flex flex-col gap-4">
           <h2 className="text-sm font-semibold tracking-wide text-zinc-500">
-            下段：各アプリ・詳細データ（一覧表表示）
+            下段：各アプリデータ＆詳細（一覧表表示）
           </h2>
           <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
             <DetailTabs products={analytics.products} sources={analytics.sources} />
@@ -177,7 +200,7 @@ function KpiCard({
       <p className="mt-3 text-3xl font-semibold tracking-tight">{value}</p>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
         <span>
-          当日 <span className="font-medium text-zinc-800">{today}</span>
+          本日 <span className="font-medium text-zinc-800">{today}</span>
         </span>
         <span>
           累計 <span className="font-medium text-zinc-800">{total}</span>

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { ProductStatsRow, SourceRow } from "@/lib/metrics";
-import { formatYen } from "@/lib/metrics";
+import { formatYen } from "@/lib/format";
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("ja-JP").format(value);
@@ -34,7 +34,7 @@ export function DetailTabs({
           active={tab === "sources"}
           onClick={() => setTab("sources")}
         >
-          流入元別詳細
+          流入元別 CVR 分析
         </TabButton>
       </div>
 
