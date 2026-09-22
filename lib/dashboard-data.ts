@@ -1,5 +1,5 @@
 import { PRODUCTS } from "@/lib/products";
-import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { isSupabaseConfigured, supabaseAdmin } from "@/lib/supabase";
 
 export type AppLog = {
   id: number;
@@ -62,21 +62,21 @@ export async function getDashboardData(): Promise<DashboardData> {
   const todayStart = startOfTodayJstIso();
 
   const [totalRes, todayRes, recentRes, ...productResults] = await Promise.all([
-    supabase.from("app_logs").select("*", { count: "exact", head: true }),
-    supabase
+    supabaseAdmin.from("app_logs").select("*", { count: "exact", head: true }),
+    supabaseAdmin
       .from("app_logs")
       .select("*", { count: "exact", head: true })
       .gte("created_at", todayStart),
-    supabase
+    supabaseAdmin
       .from("app_logs")
       .select("id, app_name, action_type, created_at")
       .order("created_at", { ascending: false })
       .limit(10),
     ...PRODUCTS.map((product) =>
-      supabase
+      supabaseAdmin
         .from("app_logs")
         .select("*", { count: "exact", head: true })
-        .eq("app_name", product.id),
+        .in("app_name", [...product.aliases]),
     ),
   ]);
 

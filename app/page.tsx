@@ -1,15 +1,21 @@
 import type { ReactNode } from "react";
 import {
-  Activity,
   AlertTriangle,
+  Banknote,
   BarChart3,
-  Boxes,
-  CalendarDays,
   LayoutDashboard,
+  PieChart,
+  Sparkles,
+  UserPlus,
+  Users,
 } from "lucide-react";
-import { UsageChart } from "@/components/usage-chart";
-import { getDashboardData } from "@/lib/dashboard-data";
-import { actionName, productName } from "@/lib/products";
+import { DailyTrendChart } from "@/components/daily-trend-chart";
+import { DashboardFilters } from "@/components/dashboard-filters";
+import { DetailTabs } from "@/components/detail-tabs";
+import { SourcePieChart } from "@/components/source-pie-chart";
+import { formatYen, getAnalyticsDashboard } from "@/lib/metrics";
+import { isPeriodKey, PERIODS, type PeriodKey } from "@/lib/period";
+import { canonicalAppId } from "@/lib/products";
 
 export const dynamic = "force-dynamic";
 
@@ -17,178 +23,129 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("ja-JP").format(value);
 }
 
-function formatDateTime(iso: string) {
-  return new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(new Date(iso));
+function firstParam(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
 }
 
-export default async function Home() {
-  const data = await getDashboardData();
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ app?: string | string[]; period?: string | string[] }>;
+}) {
+  const params = await searchParams;
+  const app = canonicalAppId(firstParam(params.app) ?? "all");
+  const periodParam = firstParam(params.period) ?? "all";
+  const period: PeriodKey = isPeriodKey(periodParam) ? periodParam : "all";
+  const periodLabel = PERIODS.find((item) => item.id === period)?.label ?? "全期間";
+
+  const analytics = await getAnalyticsDashboard({ app, period });
 
   return (
     <div className="min-h-full bg-zinc-50 text-zinc-900">
       <header className="border-b border-zinc-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-5 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white">
-              <LayoutDashboard className="h-5 w-5" />
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-5 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white">
+                <LayoutDashboard className="h-5 w-5" />
+              </div>
+              <div>
+                <h1 className="text-lg font-semibold tracking-tight sm:text-xl">
+                  中央管理ダッシュボード
+                </h1>
+                <p className="text-sm text-zinc-500">
+                  流入元分析と総合指標を一元管理
+                </p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-lg font-semibold tracking-tight sm:text-xl">
-                中央管理ダッシュボード
-              </h1>
-              <p className="text-sm text-zinc-500">
-                全プロダクトの利用指標を一元管理
-              </p>
-            </div>
+            <p className="hidden text-xs text-zinc-400 sm:block">
+              タイムゾーン: Asia/Tokyo
+            </p>
           </div>
-          <p className="hidden text-xs text-zinc-400 sm:block">
-            タイムゾーン: Asia/Tokyo
-          </p>
+          <DashboardFilters app={app} period={period} />
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        {data.error ? (
+      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-8 px-4 py-6 sm:px-6 lg:px-8">
+        {analytics.error ? (
           <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>{data.error}</p>
+            <p>{analytics.error}</p>
           </div>
         ) : null}
 
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          <SummaryCard
-            icon={<Activity className="h-5 w-5" />}
-            label="総利用回数"
-            value={formatNumber(data.totalCount)}
-            hint="app_logs 全件"
-          />
-          <SummaryCard
-            icon={<CalendarDays className="h-5 w-5" />}
-            label="今日の利用回数"
-            value={formatNumber(data.todayCount)}
-            hint="本日 0:00 以降（JST）"
-          />
-          <SummaryCard
-            icon={<Boxes className="h-5 w-5" />}
-            label="稼働中プロダクト数"
-            value={formatNumber(data.activeProductCount)}
-            hint="apology / fleamarket / car / subsidy / realestate"
-          />
-        </section>
-
-        <section className="grid grid-cols-1 gap-6 xl:grid-cols-5">
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm xl:col-span-3">
-            <div className="mb-4 flex items-center gap-2">
-              <BarChart3 className="h-5 w-5 text-indigo-600" />
-              <h2 className="font-semibold">プロダクト別利用状況</h2>
-            </div>
-            <UsageChart
-              data={data.productUsage.map((item) => ({
-                name: item.name,
-                count: item.count,
-                color: item.color,
-              }))}
+        <section className="flex flex-col gap-4">
+          <h2 className="text-sm font-semibold tracking-wide text-zinc-500">
+            上段：総合 KPI
+          </h2>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <KpiCard
+              icon={<Users className="h-5 w-5" />}
+              label="訪問数"
+              value={formatNumber(analytics.kpis.visits.period)}
+              today={formatNumber(analytics.kpis.visits.today)}
+              total={formatNumber(analytics.kpis.visits.total)}
+              hint={`${periodLabel} · analytics_visits`}
+            />
+            <KpiCard
+              icon={<Sparkles className="h-5 w-5" />}
+              label="分析数"
+              value={formatNumber(analytics.kpis.analyses.period)}
+              today={formatNumber(analytics.kpis.analyses.today)}
+              total={formatNumber(analytics.kpis.analyses.total)}
+              hint="生成・分析ログ"
+            />
+            <KpiCard
+              icon={<UserPlus className="h-5 w-5" />}
+              label="会員数"
+              value={formatNumber(analytics.kpis.members.period)}
+              today={formatNumber(analytics.kpis.members.today)}
+              total={formatNumber(analytics.kpis.members.total)}
+              hint={`無料 ${formatNumber(analytics.kpis.freeMembers.period)} ／ 有料 ${formatNumber(analytics.kpis.proMembers.period)}`}
+            />
+            <KpiCard
+              icon={<Banknote className="h-5 w-5" />}
+              label="推定売上"
+              value={formatYen(analytics.kpis.revenue.period)}
+              today={formatYen(analytics.kpis.revenue.today)}
+              total={formatYen(analytics.kpis.revenue.total)}
+              hint="決済履歴または Pro × ¥500"
             />
           </div>
+        </section>
 
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm xl:col-span-2">
-            <h2 className="mb-4 font-semibold">利用数内訳</h2>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[280px] text-left text-sm">
-                <thead>
-                  <tr className="border-b border-zinc-200 text-zinc-500">
-                    <th className="pb-3 font-medium">プロダクト</th>
-                    <th className="pb-3 text-right font-medium">利用回数</th>
-                    <th className="pb-3 text-right font-medium">構成比</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.productUsage.map((item) => (
-                    <tr key={item.id} className="border-b border-zinc-100 last:border-0">
-                      <td className="py-3">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="h-2.5 w-2.5 rounded-full"
-                            style={{ backgroundColor: item.color }}
-                          />
-                          <span className="font-medium">{item.name}</span>
-                        </div>
-                        <p className="mt-0.5 pl-5 text-xs text-zinc-400">
-                          {item.id}
-                        </p>
-                      </td>
-                      <td className="py-3 text-right tabular-nums">
-                        {formatNumber(item.count)}
-                      </td>
-                      <td className="py-3 text-right tabular-nums text-zinc-500">
-                        {item.share.toFixed(1)}%
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        <section className="flex flex-col gap-4">
+          <h2 className="text-sm font-semibold tracking-wide text-zinc-500">
+            中段：分析（グラフ表示）
+          </h2>
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
+            <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm xl:col-span-3">
+              <div className="mb-4 flex items-center gap-2">
+                <BarChart3 className="h-5 w-5 text-indigo-600" />
+                <h3 className="font-semibold">日次トレンド</h3>
+              </div>
+              <p className="mb-3 text-xs text-zinc-400">訪問数・分析数の推移</p>
+              <DailyTrendChart data={analytics.daily} />
+            </div>
+            <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm xl:col-span-2">
+              <div className="mb-4 flex items-center gap-2">
+                <PieChart className="h-5 w-5 text-indigo-600" />
+                <h3 className="font-semibold">流入元シェア</h3>
+              </div>
+              <p className="mb-3 text-xs text-zinc-400">
+                X / note / Google / Yahoo / Direct 等
+              </p>
+              <SourcePieChart data={analytics.sources} />
             </div>
           </div>
         </section>
 
-        <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <h2 className="font-semibold">リアルタイムアクティビティログ</h2>
-            <p className="text-xs text-zinc-400">直近 10 件</p>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left text-sm">
-              <thead>
-                <tr className="border-b border-zinc-200 text-zinc-500">
-                  <th className="pb-3 font-medium">ID</th>
-                  <th className="pb-3 font-medium">プロダクト名</th>
-                  <th className="pb-3 font-medium">アクション名</th>
-                  <th className="pb-3 font-medium">日時</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.recentLogs.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="py-10 text-center text-zinc-400">
-                      まだログがありません
-                    </td>
-                  </tr>
-                ) : (
-                  data.recentLogs.map((log) => (
-                    <tr
-                      key={log.id}
-                      className="border-b border-zinc-100 last:border-0"
-                    >
-                      <td className="py-3 font-mono text-xs text-zinc-500">
-                        {log.id}
-                      </td>
-                      <td className="py-3">
-                        <p className="font-medium">{productName(log.app_name)}</p>
-                        <p className="text-xs text-zinc-400">{log.app_name}</p>
-                      </td>
-                      <td className="py-3">
-                        <p>{actionName(log.action_type)}</p>
-                        <p className="font-mono text-xs text-zinc-400">
-                          {log.action_type}
-                        </p>
-                      </td>
-                      <td className="py-3 tabular-nums text-zinc-600">
-                        {formatDateTime(log.created_at)}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+        <section className="flex flex-col gap-4">
+          <h2 className="text-sm font-semibold tracking-wide text-zinc-500">
+            下段：各アプリ・詳細データ（一覧表表示）
+          </h2>
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <DetailTabs products={analytics.products} sources={analytics.sources} />
           </div>
         </section>
       </main>
@@ -196,15 +153,19 @@ export default async function Home() {
   );
 }
 
-function SummaryCard({
+function KpiCard({
   icon,
   label,
   value,
+  today,
+  total,
   hint,
 }: {
   icon: ReactNode;
   label: string;
   value: string;
+  today: string;
+  total: string;
   hint: string;
 }) {
   return (
@@ -214,7 +175,15 @@ function SummaryCard({
         <div className="rounded-lg bg-indigo-50 p-2 text-indigo-600">{icon}</div>
       </div>
       <p className="mt-3 text-3xl font-semibold tracking-tight">{value}</p>
-      <p className="mt-1 text-xs text-zinc-400">{hint}</p>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
+        <span>
+          当日 <span className="font-medium text-zinc-800">{today}</span>
+        </span>
+        <span>
+          累計 <span className="font-medium text-zinc-800">{total}</span>
+        </span>
+      </div>
+      <p className="mt-2 text-xs text-zinc-400">{hint}</p>
     </div>
   );
 }
