@@ -141,6 +141,18 @@ function sourceColor(name: string) {
   return SOURCE_META.find((item) => item.name === name)?.color ?? OTHER_SOURCE.color;
 }
 
+function isSuccessfulPayment(row: Row) {
+  const status = str(row, "status").toLowerCase();
+  if (!status) return true;
+  if (/fail|cancel|refund|void|unpaid|incomplete/.test(status)) return false;
+  return /success|paid|complete|succeeded/.test(status);
+}
+
+function paymentAmount(row: Row) {
+  const amount = Number(row.amount ?? 0);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
 function countPair(
   rows: Row[],
   aliases: string[] | null,
@@ -310,14 +322,14 @@ export async function getAnalyticsDashboard(options: {
   let logsRes;
   let eventsRes;
   let profilesRes;
-  let paymentsRes;
+  let paymentLogsRes;
   try {
-    [visitsRes, logsRes, eventsRes, profilesRes, paymentsRes] = await Promise.all([
+    [visitsRes, logsRes, eventsRes, profilesRes, paymentLogsRes] = await Promise.all([
       fetchAllRows("analytics_visits"),
       fetchAllRows("app_logs"),
       fetchAllRows("analytics_events"),
       fetchAllRows("profiles"),
-      fetchAllRows("payments"),
+      fetchAllRows("payment_logs"),
     ]);
   } catch (err) {
     return {
@@ -341,7 +353,7 @@ export async function getAnalyticsDashboard(options: {
     logsRes.error,
     eventsRes.error,
     profilesRes.error,
-    paymentsRes.error,
+    paymentLogsRes.error,
   ].filter(Boolean);
 
   const visits = visitsRes.rows.filter((row) => matchesApp(row, aliases));
@@ -362,25 +374,18 @@ export async function getAnalyticsDashboard(options: {
     isProPlan(str(row, "plan_type", "plan")),
   );
 
-  const payments = paymentsRes.rows.filter((row) => {
-    if (!matchesApp(row, aliases)) return false;
-    const status = str(row, "status", "payment_status").toLowerCase();
-    return !status || /success|paid|complete|succeeded/.test(status);
-  });
+  const paymentLogs = paymentLogsRes.rows.filter(
+    (row) => matchesApp(row, aliases) && isSuccessfulPayment(row),
+  );
 
-  const paymentAmount = (row: Row) => {
-    const amount = Number(row.amount ?? row.amount_yen ?? row.amount_total ?? 0);
-    return Number.isFinite(amount) ? amount : 0;
-  };
-
-  const hasPayments = payments.length > 0;
-  const revenue: KpiPair = hasPayments
+  const hasPaymentLogs = paymentLogs.length > 0;
+  const revenue: KpiPair = hasPaymentLogs
     ? {
-        today: payments
+        today: paymentLogs
           .filter((row) => inRange(rowDate(row), todayStart))
           .reduce((sum, row) => sum + paymentAmount(row), 0),
-        total: payments.reduce((sum, row) => sum + paymentAmount(row), 0),
-        period: payments
+        total: paymentLogs.reduce((sum, row) => sum + paymentAmount(row), 0),
+        period: paymentLogs
           .filter((row) => inRange(rowDate(row), rangeStart))
           .reduce((sum, row) => sum + paymentAmount(row), 0),
       }
@@ -484,11 +489,12 @@ export async function getAnalyticsDashboard(options: {
     const proMembers = productProfiles.filter((row) =>
       isProPlan(str(row, "plan_type", "plan")),
     ).length;
-    const productPayments = paymentsRes.rows.filter((row) => {
-      if (!matchesApp(row, ids) || !inRange(rowDate(row), rangeStart)) return false;
-      const status = str(row, "status", "payment_status").toLowerCase();
-      return !status || /success|paid|complete|succeeded/.test(status);
-    });
+    const productPayments = paymentLogsRes.rows.filter(
+      (row) =>
+        matchesApp(row, ids) &&
+        inRange(rowDate(row), rangeStart) &&
+        isSuccessfulPayment(row),
+    );
     const visitsCount = productVisits.length;
     const analysesCount = productAnalyses.length;
 

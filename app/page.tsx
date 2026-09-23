@@ -158,7 +158,7 @@ export default async function Home({
               value={formatYen(analytics.kpis.revenue.period)}
               today={formatYen(analytics.kpis.revenue.today)}
               total={formatYen(analytics.kpis.revenue.total)}
-              hint="決済履歴または Pro × ¥500"
+              hint="payment_logs または Pro × ¥500"
             />
             <KpiCard
               icon={<Share2 className="h-5 w-5" />}
