@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { connection } from "next/server";
 import {
   AlertTriangle,
   Banknote,
@@ -21,6 +22,7 @@ import { isPeriodKey, PERIODS, type PeriodKey } from "@/lib/period";
 import { canonicalAppId } from "@/lib/products";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("ja-JP").format(value);
@@ -39,13 +41,43 @@ export default async function Home({
 }: {
   searchParams: Promise<{ app?: string | string[]; period?: string | string[] }>;
 }) {
+  await connection();
   const params = await searchParams;
   const app = canonicalAppId(firstParam(params.app) ?? "all");
   const periodParam = firstParam(params.period) ?? "all";
   const period: PeriodKey = isPeriodKey(periodParam) ? periodParam : "all";
   const periodLabel = PERIODS.find((item) => item.id === period)?.label ?? "全期間";
 
-  const analytics = await getAnalyticsDashboard({ app, period });
+  let analytics;
+  try {
+    analytics = await getAnalyticsDashboard({ app, period });
+  } catch (err) {
+    const record = err as { message?: string; details?: unknown };
+    analytics = {
+      configured: false,
+      error: JSON.stringify(
+        {
+          message: record?.message ?? String(err),
+          details: record?.details ?? null,
+          thrown: true,
+        },
+        null,
+        2,
+      ),
+      kpis: {
+        visits: { today: 0, total: 0, period: 0 },
+        analyses: { today: 0, total: 0, period: 0 },
+        freeMembers: { today: 0, total: 0, period: 0 },
+        proMembers: { today: 0, total: 0, period: 0 },
+        members: { today: 0, total: 0, period: 0 },
+        revenue: { today: 0, total: 0, period: 0 },
+        topSource: { name: "—", share: 0, todayShare: 0, totalShare: 0 },
+      },
+      daily: [],
+      sources: [],
+      products: [],
+    };
+  }
 
   return (
     <div className="min-h-full bg-zinc-50 text-zinc-900">
@@ -77,7 +109,9 @@ export default async function Home({
         {analytics.error ? (
           <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>{analytics.error}</p>
+            <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-5">
+              {analytics.error}
+            </pre>
           </div>
         ) : null}
 

@@ -6,7 +6,8 @@ import {
   startOfTodayJst,
   type PeriodKey,
 } from "@/lib/period";
-import { getSupabaseAdmin, isSupabaseAdminConfigured } from "@/lib/supabase";
+import { connection } from "next/server";
+import { getSupabaseAdmin, isSupabaseAdminConfigured, describeSupabaseDebug } from "@/lib/supabase";
 
 export type KpiPair = {
   today: number;
@@ -155,42 +156,92 @@ function countPair(
   };
 }
 
+function formatRawError(error: unknown) {
+  if (error == null) return "null";
+  if (typeof error === "string") return error;
+  if (typeof error !== "object") return String(error);
+
+  const record = error as Record<string, unknown>;
+  try {
+    return JSON.stringify(
+      {
+        message: record.message ?? null,
+        details: record.details ?? null,
+        hint: record.hint ?? null,
+        code: record.code ?? null,
+        status: record.status ?? null,
+        name: record.name ?? null,
+      },
+      null,
+      2,
+    );
+  } catch {
+    return String(error);
+  }
+}
+
 async function fetchAllRows(table: string): Promise<{ rows: Row[]; error: string | null }> {
   const client = getSupabaseAdmin();
   if (!client) {
     return {
       rows: [],
-      error: "SUPABASE_SERVICE_ROLE_KEY が未設定です。",
+      error: JSON.stringify(
+        {
+          table,
+          message: "SUPABASE_SERVICE_ROLE_KEY が未設定です。",
+          details: describeSupabaseDebug(),
+        },
+        null,
+        2,
+      ),
     };
   }
 
   const rows: Row[] = [];
   let from = 0;
 
-  for (;;) {
-    const { data, error } = await client
-      .from(table)
-      .select("*")
-      .order("created_at", { ascending: false })
-      .range(from, from + PAGE_SIZE - 1);
+  try {
+    for (;;) {
+      const { data, error } = await client
+        .from(table)
+        .select("*")
+        .order("created_at", { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
 
-    if (error) {
-      if (/created_at/i.test(error.message)) {
-        const fallback = await client.from(table).select("*").range(from, from + PAGE_SIZE - 1);
-        if (fallback.error) return { rows, error: `${table}: ${fallback.error.message}` };
-        const chunk = (fallback.data as Row[] | null) ?? [];
-        rows.push(...chunk);
-        if (chunk.length < PAGE_SIZE || rows.length >= MAX_ROWS) break;
-        from += PAGE_SIZE;
-        continue;
+      if (error) {
+        if (/created_at/i.test(error.message ?? "")) {
+          const fallback = await client
+            .from(table)
+            .select("*")
+            .range(from, from + PAGE_SIZE - 1);
+          if (fallback.error) {
+            return {
+              rows,
+              error: `[${table}]\n${formatRawError(fallback.error)}`,
+            };
+          }
+          const chunk = (fallback.data as Row[] | null) ?? [];
+          rows.push(...chunk);
+          if (chunk.length < PAGE_SIZE || rows.length >= MAX_ROWS) break;
+          from += PAGE_SIZE;
+          continue;
+        }
+        return {
+          rows,
+          error: `[${table}]\n${formatRawError(error)}`,
+        };
       }
-      return { rows, error: `${table}: ${error.message}` };
-    }
 
-    const chunk = (data as Row[] | null) ?? [];
-    rows.push(...chunk);
-    if (chunk.length < PAGE_SIZE || rows.length >= MAX_ROWS) break;
-    from += PAGE_SIZE;
+      const chunk = (data as Row[] | null) ?? [];
+      rows.push(...chunk);
+      if (chunk.length < PAGE_SIZE || rows.length >= MAX_ROWS) break;
+      from += PAGE_SIZE;
+    }
+  } catch (err) {
+    return {
+      rows,
+      error: `[${table} thrown]\n${formatRawError(err)}`,
+    };
   }
 
   return { rows, error: null };
@@ -234,11 +285,19 @@ export async function getAnalyticsDashboard(options: {
     })),
   };
 
+  await connection();
+
   if (!isSupabaseAdminConfigured) {
     return {
       ...empty,
-      error:
-        "SUPABASE_SERVICE_ROLE_KEY が未設定です。サーバー側の読み取りには service_role キーが必要です。.env.local に設定してください。",
+      error: JSON.stringify(
+        {
+          message: "SUPABASE_SERVICE_ROLE_KEY が未設定です。",
+          details: describeSupabaseDebug(),
+        },
+        null,
+        2,
+      ),
     };
   }
 
@@ -247,27 +306,42 @@ export async function getAnalyticsDashboard(options: {
   const rangeStart = periodStart(options.period);
   const now = new Date();
 
-  const [visitsRes, logsRes, eventsRes, profilesRes, paymentsRes] = await Promise.all([
-    fetchAllRows("analytics_visits"),
-    fetchAllRows("app_logs"),
-    fetchAllRows("analytics_events"),
-    fetchAllRows("profiles"),
-    fetchAllRows("payments"),
-  ]);
+  let visitsRes;
+  let logsRes;
+  let eventsRes;
+  let profilesRes;
+  let paymentsRes;
+  try {
+    [visitsRes, logsRes, eventsRes, profilesRes, paymentsRes] = await Promise.all([
+      fetchAllRows("analytics_visits"),
+      fetchAllRows("app_logs"),
+      fetchAllRows("analytics_events"),
+      fetchAllRows("profiles"),
+      fetchAllRows("payments"),
+    ]);
+  } catch (err) {
+    return {
+      ...empty,
+      error: `[Promise.all thrown]\n${formatRawError(err)}\n\n${JSON.stringify(
+        { debug: describeSupabaseDebug() },
+        null,
+        2,
+      )}`,
+    };
+  }
 
-  const optionalMissing =
-    /schema cache|does not exist|could not find the table|relation .+ does not exist/i;
+  const debugHeader = JSON.stringify(
+    { debug: describeSupabaseDebug(), cache: "no-store", revalidate: 0 },
+    null,
+    2,
+  );
 
   const errors = [
     visitsRes.error,
-    logsRes.error && !optionalMissing.test(logsRes.error) ? logsRes.error : null,
-    eventsRes.error && !optionalMissing.test(eventsRes.error) ? eventsRes.error : null,
-    profilesRes.error && !optionalMissing.test(profilesRes.error)
-      ? profilesRes.error
-      : null,
-    paymentsRes.error && !optionalMissing.test(paymentsRes.error)
-      ? paymentsRes.error
-      : null,
+    logsRes.error,
+    eventsRes.error,
+    profilesRes.error,
+    paymentsRes.error,
   ].filter(Boolean);
 
   const visits = visitsRes.rows.filter((row) => matchesApp(row, aliases));
@@ -474,10 +548,8 @@ export async function getAnalyticsDashboard(options: {
     configured: true,
     error:
       errors.length > 0
-        ? `一部テーブルを読み込めませんでした（RLS または未作成の可能性）: ${errors.join(" / ")}`
-        : visitsRes.error && visits.length === 0
-          ? visitsRes.error
-          : null,
+        ? `${debugHeader}\n\n${errors.join("\n\n")}`
+        : null,
     kpis: {
       visits: visitsKpi,
       analyses: analysesKpi,

@@ -93,12 +93,26 @@ export async function getDashboardData(): Promise<DashboardData> {
     ),
   ]);
 
-  const firstError =
-    totalRes.error?.message ||
-    todayRes.error?.message ||
-    recentRes.error?.message ||
-    productResults.find((result) => result.error)?.error?.message ||
-    null;
+  const firstError = [
+    totalRes.error,
+    todayRes.error,
+    recentRes.error,
+    productResults.find((result) => result.error)?.error,
+  ]
+    .filter(Boolean)
+    .map((error) =>
+      JSON.stringify(
+        {
+          message: error?.message ?? null,
+          details: error?.details ?? null,
+          hint: error?.hint ?? null,
+          code: error?.code ?? null,
+        },
+        null,
+        2,
+      ),
+    )
+    .join("\n\n") || null;
 
   const totalCount = totalRes.count ?? 0;
   const productUsage = PRODUCTS.map((product, index) => {
