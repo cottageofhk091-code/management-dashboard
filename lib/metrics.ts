@@ -101,6 +101,52 @@ function matchesApp(row: Row, aliases: string[] | null) {
   return aliases.some((alias) => alias.toLowerCase() === id);
 }
 
+/** profiles に app_id が無い場合、同一ユーザーの visits/events からアプリ帰属を推定 */
+function matchesProfileApp(
+  row: Row,
+  aliases: string[] | null,
+  attributedUserIds: Set<string>,
+) {
+  if (!aliases) return true;
+  if (matchesApp(row, aliases)) return true;
+  const uid = str(row, "id", "user_id");
+  return Boolean(uid && attributedUserIds.has(uid));
+}
+
+function analysisDedupeKey(row: Row) {
+  const app = rowAppId(row).toLowerCase() || "unknown";
+  const uid = str(row, "user_id", "uid") || "anon";
+  const type = str(row, "event_type", "action_type", "type") || "analysis";
+  const at = str(row, "created_at", "inserted_at", "createdAt");
+  const id = str(row, "id");
+  // id があれば最優先。無ければ秒単位で近似デデュープ
+  if (id) return `${app}|${id}`;
+  const bucket = at ? at.slice(0, 19) : "na";
+  return `${app}|${uid}|${type}|${bucket}`;
+}
+
+function dedupeAnalysisRows(rows: Row[]) {
+  const seen = new Set<string>();
+  const out: Row[] = [];
+  for (const row of rows) {
+    const key = analysisDedupeKey(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
+/** free_credits / has_used_pro_trial から「お試し消費済み」推定回数（ログ欠落時フォールバック） */
+function trialConsumedEstimate(row: Row): number {
+  if (Boolean(row.has_used_pro_trial)) return 1;
+  const creditsRaw = row.free_credits ?? row.free_pro_credits;
+  if (typeof creditsRaw === "number" && !Number.isNaN(creditsRaw) && creditsRaw <= 0) {
+    return 1;
+  }
+  return 0;
+}
+
 function inRange(date: Date | null, start: Date | null, end?: Date) {
   if (!date) return false;
   if (start && date < start) return false;
@@ -189,6 +235,37 @@ function formatRawError(error: unknown) {
     );
   } catch {
     return String(error);
+  }
+}
+
+async function countExact(
+  table: string,
+  options?: {
+    appColumn?: string;
+    aliases?: string[] | null;
+    gteCreatedAt?: string | null;
+  },
+): Promise<{ count: number; error: string | null }> {
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return { count: 0, error: "SUPABASE_SERVICE_ROLE_KEY が未設定です。" };
+  }
+
+  try {
+    let query = client.from(table).select("*", { count: "exact", head: true });
+    if (options?.aliases?.length && options.appColumn) {
+      query = query.in(options.appColumn, options.aliases);
+    }
+    if (options?.gteCreatedAt) {
+      query = query.gte("created_at", options.gteCreatedAt);
+    }
+    const { count, error } = await query;
+    if (error) {
+      return { count: 0, error: `[${table} count]\n${formatRawError(error)}` };
+    }
+    return { count: count ?? 0, error: null };
+  } catch (err) {
+    return { count: 0, error: `[${table} count thrown]\n${formatRawError(err)}` };
   }
 }
 
@@ -348,7 +425,7 @@ export async function getAnalyticsDashboard(options: {
     2,
   );
 
-  const errors = [
+  const fetchErrors = [
     visitsRes.error,
     logsRes.error,
     eventsRes.error,
@@ -357,16 +434,114 @@ export async function getAnalyticsDashboard(options: {
   ].filter(Boolean);
 
   const visits = visitsRes.rows.filter((row) => matchesApp(row, aliases));
-  const allAnalyses = [
+  const rawAnalyses = [
     ...logsRes.rows,
     ...eventsRes.rows.filter(isAnalysisEvent),
-  ];
-  const analyses = allAnalyses.filter((row) => matchesApp(row, aliases));
+  ].filter((row) => matchesApp(row, aliases));
+  const analyses = dedupeAnalysisRows(rawAnalyses);
+
+  // アプリに紐づく user_id（profiles に app_id が無くても帰属できるように）
+  const attributedUserIds = new Set<string>();
+  for (const row of [...visits, ...analyses]) {
+    const uid = str(row, "user_id", "uid");
+    if (uid) attributedUserIds.add(uid);
+  }
+
   const allProfiles = profilesRes.rows;
-  const profiles = allProfiles.filter((row) => matchesApp(row, aliases));
+  const profiles = allProfiles.filter((row) =>
+    matchesProfileApp(row, aliases, attributedUserIds),
+  );
+
+  // DB COUNT(*) を優先（過去ログの全件集計）。取得行と突き合わせ、大きい方を採用
+  const aliasList = aliases;
+  const todayIso = todayStart.toISOString();
+  const rangeIso = rangeStart ? rangeStart.toISOString() : null;
+  const [eventsTotal, eventsToday, eventsPeriod, logsTotal, logsToday, logsPeriod] =
+    await Promise.all([
+      countExact("analytics_events", {
+        appColumn: "app_id",
+        aliases: aliasList,
+      }),
+      countExact("analytics_events", {
+        appColumn: "app_id",
+        aliases: aliasList,
+        gteCreatedAt: todayIso,
+      }),
+      countExact("analytics_events", {
+        appColumn: "app_id",
+        aliases: aliasList,
+        gteCreatedAt: rangeIso,
+      }),
+      countExact("app_logs", {
+        appColumn: "app_name",
+        aliases: aliasList,
+      }),
+      countExact("app_logs", {
+        appColumn: "app_name",
+        aliases: aliasList,
+        gteCreatedAt: todayIso,
+      }),
+      countExact("app_logs", {
+        appColumn: "app_name",
+        aliases: aliasList,
+        gteCreatedAt: rangeIso,
+      }),
+    ]);
+
+  const countErrors = [
+    eventsTotal.error,
+    eventsToday.error,
+    eventsPeriod.error,
+    logsTotal.error,
+    logsToday.error,
+    logsPeriod.error,
+  ].filter(Boolean);
+
+  const errors = [...fetchErrors, ...countErrors];
 
   const visitsKpi = countPair(visits, null, todayStart, rangeStart);
-  const analysesKpi = countPair(analyses, null, todayStart, rangeStart);
+  const analysesFromRows = countPair(analyses, null, todayStart, rangeStart);
+
+  // ログ欠落時: free_credits 消費 / has_used_pro_trial から最低回数を補完
+  const analysisUserIds = new Set(
+    analyses.map((row) => str(row, "user_id", "uid")).filter(Boolean),
+  );
+  let fallbackToday = 0;
+  let fallbackTotal = 0;
+  let fallbackPeriod = 0;
+  for (const row of profiles) {
+    const estimate = trialConsumedEstimate(row);
+    if (estimate <= 0) continue;
+    const uid = str(row, "id", "user_id");
+    if (uid && analysisUserIds.has(uid)) continue;
+    const date =
+      rowDate(row) ||
+      (() => {
+        const raw = str(row, "updated_at", "updatedAt");
+        if (!raw) return null;
+        const d = new Date(raw);
+        return Number.isNaN(d.getTime()) ? null : d;
+      })();
+    fallbackTotal += estimate;
+    if (inRange(date, todayStart)) fallbackToday += estimate;
+    if (inRange(date, rangeStart)) fallbackPeriod += estimate;
+  }
+
+  const analysesKpi: KpiPair = {
+    today: Math.max(
+      analysesFromRows.today + fallbackToday,
+      Math.max(eventsToday.count || 0, logsToday.count || 0),
+    ),
+    total: Math.max(
+      analysesFromRows.total + fallbackTotal,
+      Math.max(eventsTotal.count || 0, logsTotal.count || 0),
+    ),
+    period: Math.max(
+      analysesFromRows.period + fallbackPeriod,
+      Math.max(eventsPeriod.count || 0, logsPeriod.count || 0),
+    ),
+  };
+
   const freeKpi = countPair(profiles, null, todayStart, rangeStart, (row) =>
     isFreePlan(str(row, "plan_type", "plan")),
   );
@@ -402,7 +577,7 @@ export async function getAnalyticsDashboard(options: {
       .map((row) => str(row, "id", "user_id"))
       .filter(Boolean),
   );
-  const analysisUserIds = new Set(
+  const periodAnalysisUserIds = new Set(
     periodAnalyses
       .map((row) => str(row, "user_id", "uid"))
       .filter(Boolean),
@@ -414,7 +589,7 @@ export async function getAnalyticsDashboard(options: {
     const current = sourceCounts.get(name) ?? { visits: 0, conversions: 0 };
     current.visits += 1;
     const userId = str(row, "user_id", "uid");
-    if (userId && (profileIds.has(userId) || analysisUserIds.has(userId))) {
+    if (userId && (profileIds.has(userId) || periodAnalysisUserIds.has(userId))) {
       current.conversions += 1;
     }
     sourceCounts.set(name, current);
@@ -472,16 +647,28 @@ export async function getAnalyticsDashboard(options: {
     period: freeKpi.period + proKpi.period,
   };
 
+  const allAnalysesUniverse = dedupeAnalysisRows([
+    ...logsRes.rows,
+    ...eventsRes.rows.filter(isAnalysisEvent),
+  ]);
+
   const products: ProductStatsRow[] = PRODUCTS.map((product) => {
     const ids = [...product.aliases];
     const productVisits = visitsRes.rows.filter(
       (row) => matchesApp(row, ids) && inRange(rowDate(row), rangeStart),
     );
-    const productAnalyses = allAnalyses.filter(
+    const productAnalyses = allAnalysesUniverse.filter(
       (row) => matchesApp(row, ids) && inRange(rowDate(row), rangeStart),
     );
+    const productAttributed = new Set<string>();
+    for (const row of [...productVisits, ...productAnalyses]) {
+      const uid = str(row, "user_id", "uid");
+      if (uid) productAttributed.add(uid);
+    }
     const productProfiles = allProfiles.filter(
-      (row) => matchesApp(row, ids) && inRange(rowDate(row), rangeStart),
+      (row) =>
+        matchesProfileApp(row, ids, productAttributed) &&
+        inRange(rowDate(row), rangeStart),
     );
     const freeMembers = productProfiles.filter((row) =>
       isFreePlan(str(row, "plan_type", "plan")),
@@ -495,8 +682,25 @@ export async function getAnalyticsDashboard(options: {
         inRange(rowDate(row), rangeStart) &&
         isSuccessfulPayment(row),
     );
+
+    // ログ欠落時フォールバック（お試し消費済み profiles）
+    const productAnalysisUsers = new Set(
+      productAnalyses.map((row) => str(row, "user_id", "uid")).filter(Boolean),
+    );
+    let fallback = 0;
+    for (const row of allProfiles.filter((r) =>
+      matchesProfileApp(r, ids, productAttributed),
+    )) {
+      const estimate = trialConsumedEstimate(row);
+      if (estimate <= 0) continue;
+      const uid = str(row, "id", "user_id");
+      if (uid && productAnalysisUsers.has(uid)) continue;
+      if (!inRange(rowDate(row), rangeStart)) continue;
+      fallback += estimate;
+    }
+
     const visitsCount = productVisits.length;
-    const analysesCount = productAnalyses.length;
+    const analysesCount = productAnalyses.length + fallback;
 
     return {
       id: product.id,

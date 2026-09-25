@@ -74,7 +74,7 @@ export async function getDashboardData(): Promise<DashboardData> {
 
   const todayStart = startOfTodayJstIso();
 
-  const [totalRes, todayRes, recentRes, ...productResults] = await Promise.all([
+  const [totalRes, todayRes, recentRes, eventsTotalRes, ...productResults] = await Promise.all([
     client.from("app_logs").select("*", { count: "exact", head: true }),
     client
       .from("app_logs")
@@ -85,6 +85,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       .select("id, app_name, action_type, created_at")
       .order("created_at", { ascending: false })
       .limit(10),
+    client.from("analytics_events").select("*", { count: "exact", head: true }),
     ...PRODUCTS.map((product) =>
       client
         .from("app_logs")
@@ -93,11 +94,22 @@ export async function getDashboardData(): Promise<DashboardData> {
     ),
   ]);
 
+  const productEventResults = await Promise.all(
+    PRODUCTS.map((product) =>
+      client
+        .from("analytics_events")
+        .select("*", { count: "exact", head: true })
+        .in("app_id", [...product.aliases]),
+    ),
+  );
+
   const firstError = [
     totalRes.error,
     todayRes.error,
     recentRes.error,
+    eventsTotalRes.error,
     productResults.find((result) => result.error)?.error,
+    productEventResults.find((result) => result.error)?.error,
   ]
     .filter(Boolean)
     .map((error) =>
@@ -114,9 +126,14 @@ export async function getDashboardData(): Promise<DashboardData> {
     )
     .join("\n\n") || null;
 
-  const totalCount = totalRes.count ?? 0;
+  const logsTotal = totalRes.count ?? 0;
+  const eventsTotal = eventsTotalRes.count ?? 0;
+  const totalCount = Math.max(logsTotal, eventsTotal);
+
   const productUsage = PRODUCTS.map((product, index) => {
-    const count = productResults[index]?.count ?? 0;
+    const logCount = productResults[index]?.count ?? 0;
+    const eventCount = productEventResults[index]?.count ?? 0;
+    const count = Math.max(logCount, eventCount);
     return {
       id: product.id,
       name: product.name,

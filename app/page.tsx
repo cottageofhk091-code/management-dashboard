@@ -15,6 +15,7 @@ import {
 import { DailyTrendChart } from "@/components/daily-trend-chart";
 import { DashboardFilters } from "@/components/dashboard-filters";
 import { DetailTabs } from "@/components/detail-tabs";
+import { LiveRefresh } from "@/components/live-refresh";
 import { SourcePieChart } from "@/components/source-pie-chart";
 import { formatYen } from "@/lib/format";
 import { getAnalyticsDashboard } from "@/lib/metrics";
@@ -81,6 +82,7 @@ export default async function Home({
 
   return (
     <div className="min-h-full bg-zinc-50 text-zinc-900">
+      <LiveRefresh intervalMs={20000} />
       <header className="border-b border-zinc-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-5 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between gap-4">
@@ -134,7 +136,7 @@ export default async function Home({
               value={formatNumber(analytics.kpis.analyses.period)}
               today={formatNumber(analytics.kpis.analyses.today)}
               total={formatNumber(analytics.kpis.analyses.total)}
-              hint="app_logs / analytics_events"
+              hint="analytics_events COUNT / app_logs / credits fallback"
             />
             <KpiCard
               icon={<UserPlus className="h-5 w-5" />}
