@@ -1,4 +1,4 @@
-import { aliasesForApp, findProduct, PRODUCTS, PRO_PRICE_YEN } from "@/lib/products";
+import { aliasesForApp, canonicalizeAppKey, PRODUCTS, PRO_PRICE_YEN, resolveRowProductId } from "@/lib/products";
 import {
   enumerateDays,
   jstYmd,
@@ -116,20 +116,14 @@ function rowDate(row: Row) {
 }
 
 function rowAppId(row: Row) {
-  const candidates = [str(row, "app_id"), str(row, "app_name"), str(row, "app")].filter(
-    Boolean,
-  );
-  for (const candidate of candidates) {
-    if (findProduct(candidate)) return candidate;
-  }
-  return candidates[0] ?? "";
+  return resolveRowProductId(row) ?? "";
 }
 
 function matchesApp(row: Row, aliases: string[] | null) {
   if (!aliases) return true;
-  const id = rowAppId(row).toLowerCase();
+  const id = resolveRowProductId(row);
   if (!id) return false;
-  return aliases.some((alias) => alias.toLowerCase() === id);
+  return aliases.some((alias) => canonicalizeAppKey(alias) === id);
 }
 
 /** profiles に app_id が無い場合、同一ユーザーの visits/events からアプリ帰属を推定 */
@@ -140,6 +134,8 @@ function matchesProfileApp(
 ) {
   if (!aliases) return true;
   if (matchesApp(row, aliases)) return true;
+  const explicit = resolveRowProductId(row);
+  if (explicit) return false;
   const uid = str(row, "id", "user_id");
   return Boolean(uid && attributedUserIds.has(uid));
 }
