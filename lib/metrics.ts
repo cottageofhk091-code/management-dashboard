@@ -8,6 +8,14 @@ import {
 } from "@/lib/period";
 import { connection } from "next/server";
 import { getSupabaseAdmin, isSupabaseAdminConfigured, describeSupabaseDebug } from "@/lib/supabase";
+import {
+  effectiveResetAt,
+  getCountResetMap,
+  laterDate,
+  laterIso,
+  rowPassesCountReset,
+  type CountResetMap,
+} from "@/lib/count-reset";
 
 export type KpiPair = {
   today: number;
@@ -175,6 +183,20 @@ function inRange(date: Date | null, start: Date | null, end?: Date) {
   if (start && date < start) return false;
   if (end && date > end) return false;
   return true;
+}
+
+function afterCountReset(row: Row, map: CountResetMap) {
+  return rowPassesCountReset(rowAppId(row), rowDate(row), map);
+}
+
+function pickCount(
+  fromRows: number,
+  fromDb: number,
+  map: CountResetMap,
+  view: string,
+) {
+  if (view === "all" && Object.keys(map.byApp).length > 0) return fromRows;
+  return Math.max(fromRows, fromDb);
 }
 
 function isProPlan(value: string) {
@@ -452,6 +474,12 @@ export async function getAnalyticsDashboard(options: {
 
   await connection();
 
+  const resetMap = await getCountResetMap();
+  const viewReset = effectiveResetAt(
+    resetMap,
+    options.app === "all" ? "all" : options.app,
+  );
+
   if (!isSupabaseAdminConfigured) {
     return {
       ...empty,
@@ -468,7 +496,8 @@ export async function getAnalyticsDashboard(options: {
 
   const aliases = aliasesForApp(options.app === "all" ? "all" : options.app);
   const todayStart = startOfTodayJst();
-  const rangeStart = periodStart(options.period);
+  const rangeStart = laterDate(periodStart(options.period), viewReset);
+  const todayBound = laterDate(todayStart, viewReset) ?? todayStart;
   const now = new Date();
 
   let visitsRes;
@@ -513,11 +542,13 @@ export async function getAnalyticsDashboard(options: {
     paymentLogsRes.error,
   ].filter(Boolean);
 
-  const visits = visitsRes.rows.filter((row) => matchesApp(row, aliases));
+  const visits = visitsRes.rows.filter(
+    (row) => afterCountReset(row, resetMap) && matchesApp(row, aliases),
+  );
   const rawAnalyses = [
     ...logsRes.rows,
     ...eventsRes.rows.filter(isAnalysisEvent),
-  ].filter((row) => matchesApp(row, aliases));
+  ].filter((row) => afterCountReset(row, resetMap) && matchesApp(row, aliases));
   const analyses = dedupeAnalysisRows(rawAnalyses);
 
   const attributedUserIds = new Set<string>();
@@ -526,17 +557,18 @@ export async function getAnalyticsDashboard(options: {
     if (uid) attributedUserIds.add(uid);
   }
 
-  const allProfiles = dedupeProfiles([
-    ...usersProfilesRes.rows.map(normalizeProfile),
-    ...profilesRes.rows.map(normalizeProfile),
-  ]);
+  const allProfiles = dedupeProfiles(
+    [...usersProfilesRes.rows, ...profilesRes.rows]
+      .map(normalizeProfile)
+      .filter((row) => afterCountReset(row, resetMap)),
+  );
   const profiles = allProfiles.filter((row) =>
     matchesProfileApp(row, aliases, attributedUserIds),
   );
 
   const aliasList = aliases;
-  const todayIso = todayStart.toISOString();
-  const rangeIso = rangeStart ? rangeStart.toISOString() : null;
+  const todayIso = todayBound.toISOString();
+  const rangeIso = laterIso(rangeStart ? rangeStart.toISOString() : null, viewReset);
 
   const generateFilter = {
     inFilter: { column: "event_type", values: GENERATE_EVENT_TYPES },
@@ -692,8 +724,8 @@ export async function getAnalyticsDashboard(options: {
 
   const errors = [...fetchErrors, ...countErrors];
 
-  const visitsKpi = countPair(visits, null, todayStart, rangeStart);
-  const analysesFromRows = countPair(analyses, null, todayStart, rangeStart);
+  const visitsKpi = countPair(visits, null, todayBound, rangeStart);
+  const analysesFromRows = countPair(analyses, null, todayBound, rangeStart);
 
   const analysisUserIds = new Set(
     analyses.map((row) => str(row, "user_id", "uid")).filter(Boolean),
@@ -715,52 +747,92 @@ export async function getAnalyticsDashboard(options: {
         return Number.isNaN(d.getTime()) ? null : d;
       })();
     fallbackTotal += estimate;
-    if (inRange(date, todayStart)) fallbackToday += estimate;
+    if (inRange(date, todayBound)) fallbackToday += estimate;
     if (inRange(date, rangeStart)) fallbackPeriod += estimate;
   }
 
+  const viewKey = options.app === "all" ? "all" : options.app;
   const analysesKpi: KpiPair = {
-    today: Math.max(
+    today: pickCount(
       analysesFromRows.today + fallbackToday,
       (eventsToday.count || 0) + (logsToday.count || 0),
+      resetMap,
+      viewKey,
     ),
-    total: Math.max(
+    total: pickCount(
       analysesFromRows.total + fallbackTotal,
       (eventsTotal.count || 0) + (logsTotal.count || 0),
+      resetMap,
+      viewKey,
     ),
-    period: Math.max(
+    period: pickCount(
       analysesFromRows.period + fallbackPeriod,
       (eventsPeriod.count || 0) + (logsPeriod.count || 0),
+      resetMap,
+      viewKey,
     ),
   };
 
-  const freeFromRows = countPair(profiles, null, todayStart, rangeStart, (row) =>
+  const freeFromRows = countPair(profiles, null, todayBound, rangeStart, (row) =>
     isFreePlan(profilePlan(row)),
   );
-  const proFromRows = countPair(profiles, null, todayStart, rangeStart, (row) =>
+  const proFromRows = countPair(profiles, null, todayBound, rangeStart, (row) =>
     isProPlan(profilePlan(row)),
   );
 
   const freeKpi: KpiPair = {
-    today: Math.max(freeFromRows.today, freeToday.count || 0, signupToday.count || 0),
-    total: Math.max(freeFromRows.total, freeTotal.count || 0, signupTotal.count || 0),
-    period: Math.max(freeFromRows.period, freePeriod.count || 0, signupPeriod.count || 0),
+    today: pickCount(
+      Math.max(freeFromRows.today, signupToday.count || 0),
+      freeToday.count || 0,
+      resetMap,
+      viewKey,
+    ),
+    total: pickCount(
+      Math.max(freeFromRows.total, signupTotal.count || 0),
+      freeTotal.count || 0,
+      resetMap,
+      viewKey,
+    ),
+    period: pickCount(
+      Math.max(freeFromRows.period, signupPeriod.count || 0),
+      freePeriod.count || 0,
+      resetMap,
+      viewKey,
+    ),
   };
   const proKpi: KpiPair = {
-    today: Math.max(proFromRows.today, proToday.count || 0, paidEventToday.count || 0),
-    total: Math.max(proFromRows.total, proTotal.count || 0, paidEventTotal.count || 0),
-    period: Math.max(proFromRows.period, proPeriod.count || 0, paidEventPeriod.count || 0),
+    today: pickCount(
+      Math.max(proFromRows.today, paidEventToday.count || 0),
+      proToday.count || 0,
+      resetMap,
+      viewKey,
+    ),
+    total: pickCount(
+      Math.max(proFromRows.total, paidEventTotal.count || 0),
+      proTotal.count || 0,
+      resetMap,
+      viewKey,
+    ),
+    period: pickCount(
+      Math.max(proFromRows.period, paidEventPeriod.count || 0),
+      proPeriod.count || 0,
+      resetMap,
+      viewKey,
+    ),
   };
 
   const paymentLogs = paymentLogsRes.rows.filter(
-    (row) => matchesApp(row, aliases) && isSuccessfulPayment(row),
+    (row) =>
+      afterCountReset(row, resetMap) &&
+      matchesApp(row, aliases) &&
+      isSuccessfulPayment(row),
   );
 
   const hasPaymentLogs = paymentLogs.length > 0;
   const revenue: KpiPair = hasPaymentLogs
     ? {
         today: paymentLogs
-          .filter((row) => inRange(rowDate(row), todayStart))
+          .filter((row) => inRange(rowDate(row), todayBound))
           .reduce((sum, row) => sum + paymentAmount(row), 0),
         total: paymentLogs.reduce((sum, row) => sum + paymentAmount(row), 0),
         period: paymentLogs
@@ -825,7 +897,7 @@ export async function getAnalyticsDashboard(options: {
   });
 
   const topSource = [...sources].sort((a, b) => b.visits - a.visits)[0];
-  const todayVisits = visits.filter((row) => inRange(rowDate(row), todayStart));
+  const todayVisits = visits.filter((row) => inRange(rowDate(row), todayBound));
   const countBySource = (rows: Row[]) => {
     const counts = new Map<string, number>();
     for (const row of rows) {
@@ -850,18 +922,24 @@ export async function getAnalyticsDashboard(options: {
     period: freeKpi.period + proKpi.period,
   };
 
-  const allAnalysesUniverse = dedupeAnalysisRows([
-    ...logsRes.rows,
-    ...eventsRes.rows.filter(isAnalysisEvent),
-  ]);
+  const allAnalysesUniverse = dedupeAnalysisRows(
+    [...logsRes.rows, ...eventsRes.rows.filter(isAnalysisEvent)].filter((row) =>
+      afterCountReset(row, resetMap),
+    ),
+  );
 
   const products: ProductStatsRow[] = PRODUCTS.map((product) => {
     const ids = [...product.aliases];
+    const productReset = effectiveResetAt(resetMap, product.id);
+    const productRange = laterDate(rangeStart, productReset);
     const productVisits = visitsRes.rows.filter(
-      (row) => matchesApp(row, ids) && inRange(rowDate(row), rangeStart),
+      (row) =>
+        afterCountReset(row, resetMap) &&
+        matchesApp(row, ids) &&
+        inRange(rowDate(row), productRange),
     );
     const productAnalyses = allAnalysesUniverse.filter(
-      (row) => matchesApp(row, ids) && inRange(rowDate(row), rangeStart),
+      (row) => matchesApp(row, ids) && inRange(rowDate(row), productRange),
     );
     const productAttributed = new Set<string>();
     for (const row of [...productVisits, ...productAnalyses]) {
@@ -871,7 +949,7 @@ export async function getAnalyticsDashboard(options: {
     const productProfiles = allProfiles.filter(
       (row) =>
         matchesProfileApp(row, ids, productAttributed) &&
-        inRange(rowDate(row), rangeStart),
+        inRange(rowDate(row), productRange),
     );
     const freeMembers = productProfiles.filter((row) =>
       isFreePlan(profilePlan(row)),
@@ -881,8 +959,9 @@ export async function getAnalyticsDashboard(options: {
     ).length;
     const productPayments = paymentLogsRes.rows.filter(
       (row) =>
+        afterCountReset(row, resetMap) &&
         matchesApp(row, ids) &&
-        inRange(rowDate(row), rangeStart) &&
+        inRange(rowDate(row), productRange) &&
         isSuccessfulPayment(row),
     );
 
@@ -898,7 +977,7 @@ export async function getAnalyticsDashboard(options: {
       if (estimate <= 0) continue;
       const uid = str(row, "id", "user_id");
       if (uid && productAnalysisUsers.has(uid)) continue;
-      if (!inRange(rowDate(row), rangeStart)) continue;
+      if (!inRange(rowDate(row), productRange)) continue;
       fallback += estimate;
     }
 

@@ -7,6 +7,15 @@ alter table if exists public.analytics_events enable row level security;
 alter table if exists public.profiles enable row level security;
 alter table if exists public.app_logs enable row level security;
 
+create table if not exists public.system_settings (
+  key text primary key,
+  value text not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table if exists public.system_settings enable row level security;
+grant select, insert, update on public.system_settings to service_role;
+
 -- 会員の正は users_profiles（app_name / membership_status）。
 -- ダッシュボードは app_id 列が無いため app_name を製品 ID として集計する。
 

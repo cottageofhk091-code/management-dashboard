@@ -16,11 +16,12 @@ import { DailyTrendChart } from "@/components/daily-trend-chart";
 import { DashboardFilters } from "@/components/dashboard-filters";
 import { DetailTabs } from "@/components/detail-tabs";
 import { LiveRefresh } from "@/components/live-refresh";
+import { ResetCountsButton } from "@/components/reset-counts-button";
 import { SourcePieChart } from "@/components/source-pie-chart";
 import { formatYen } from "@/lib/format";
 import { getAnalyticsDashboard } from "@/lib/metrics";
 import { isPeriodKey, PERIODS, type PeriodKey } from "@/lib/period";
-import { canonicalAppId } from "@/lib/products";
+import { canonicalAppId, PRODUCTS } from "@/lib/products";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -48,6 +49,8 @@ export default async function Home({
   const periodParam = firstParam(params.period) ?? "all";
   const period: PeriodKey = isPeriodKey(periodParam) ? periodParam : "all";
   const periodLabel = PERIODS.find((item) => item.id === period)?.label ?? "全期間";
+  const appLabel =
+    app === "all" ? "全体" : PRODUCTS.find((item) => item.id === app)?.name ?? app;
 
   let analytics;
   try {
@@ -99,9 +102,12 @@ export default async function Home({
                 </p>
               </div>
             </div>
-            <p className="hidden text-xs text-zinc-400 sm:block">
-              タイムゾーン: Asia/Tokyo
-            </p>
+            <div className="flex flex-col items-end gap-2">
+              <p className="hidden text-xs text-zinc-400 sm:block">
+                タイムゾーン: Asia/Tokyo
+              </p>
+              <ResetCountsButton appId={app} appName={appLabel} />
+            </div>
           </div>
           <DashboardFilters app={app} period={period} />
         </div>
