@@ -25,6 +25,7 @@ import { canonicalAppId, PRODUCTS } from "@/lib/products";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("ja-JP").format(value);

@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { canonicalAppId, findProduct, type ProductId } from "@/lib/products";
+import { aliasesForReset, canonicalAppId, findProduct, type ProductId } from "@/lib/products";
 import {
   GLOBAL_RESET_SCOPE,
   RESET_KEY_PREFIX,
@@ -184,24 +184,145 @@ export async function saveCountReset(
   };
 
   const { error } = await client.from(SETTINGS_TABLE).upsert(row, { onConflict: "key" });
-  if (!error) return { ok: true, resetAt };
-
   try {
     await writeFileReset(scope, resetAt);
-    return { ok: true, resetAt };
   } catch (fileErr) {
-    const message = error.message || "system_settings への保存に失敗しました。";
-    return {
-      ok: false,
-      error: `リセット起点の保存に失敗しました: ${message}${
-        fileErr instanceof Error ? ` / ${fileErr.message}` : ""
-      }`,
-      sql: `create table if not exists public.system_settings (
+    if (error) {
+      const message = error.message || "system_settings への保存に失敗しました。";
+      return {
+        ok: false,
+        error: `リセット起点の保存に失敗しました: ${message}${
+          fileErr instanceof Error ? ` / ${fileErr.message}` : ""
+        }`,
+        sql: `create table if not exists public.system_settings (
   key text primary key,
   value text not null,
   updated_at timestamptz not null default now()
 );
 grant select, insert, update on public.system_settings to service_role;`,
+      };
+    }
+  }
+  return { ok: true, resetAt };
+}
+
+type DeleteResult = { table: string; deleted: number | null; error: string | null };
+
+async function deleteMatchingRows(
+  table: string,
+  columns: string[],
+  aliases: string[] | null,
+): Promise<DeleteResult> {
+  const client = getSupabaseAdmin();
+  if (!client) return { table, deleted: 0, error: "admin client missing" };
+
+  if (!aliases) {
+    const { error, count } = await client
+      .from(table)
+      .delete({ count: "exact" })
+      .gte("created_at", "1970-01-01T00:00:00.000Z");
+    return {
+      table,
+      deleted: count ?? null,
+      error: error ? error.message : null,
     };
   }
+
+  let deleted = 0;
+  let lastError: string | null = null;
+  for (const column of columns) {
+    const { error, count } = await client
+      .from(table)
+      .delete({ count: "exact" })
+      .in(column, aliases);
+    if (error) {
+      const msg = `${error.message} ${error.code ?? ""}`;
+      if (/schema cache|does not exist|column|42703|PGRST204/i.test(msg)) {
+        continue;
+      }
+      lastError = error.message;
+      continue;
+    }
+    deleted += count ?? 0;
+  }
+  return { table, deleted, error: lastError };
+}
+
+async function resetProfileCredits(aliases: string[] | null): Promise<DeleteResult> {
+  const client = getSupabaseAdmin();
+  if (!client) {
+    return { table: "users_profiles", deleted: 0, error: "admin client missing" };
+  }
+
+  const payloads: Record<string, unknown>[] = [
+    { free_pro_credits: 1, has_used_pro_trial: false, free_credits: 1 },
+    { free_pro_credits: 1, free_credits: 1 },
+    { free_pro_credits: 1 },
+  ];
+
+  let lastError: string | null = null;
+  for (const payload of payloads) {
+    let query = client.from("users_profiles").update(payload, { count: "exact" });
+    query = aliases
+      ? query.in("app_name", aliases)
+      : query.gte("created_at", "1970-01-01T00:00:00.000Z");
+    const { error, count } = await query;
+    if (!error) {
+      return { table: "users_profiles", deleted: count ?? null, error: null };
+    }
+    lastError = error.message;
+    if (/schema cache|does not exist|column|42703|PGRST204/i.test(`${error.message} ${error.code ?? ""}`)) {
+      continue;
+    }
+    break;
+  }
+
+  if (aliases) {
+    const retry = await client
+      .from("users_profiles")
+      .update({ free_pro_credits: 1 }, { count: "exact" })
+      .in("app_id", aliases);
+    if (!retry.error) {
+      return { table: "users_profiles", deleted: retry.count ?? null, error: null };
+    }
+  }
+
+  return { table: "users_profiles", deleted: 0, error: lastError };
+}
+
+export async function executeCountReset(scope: "all" | ProductId): Promise<{
+  ok: boolean;
+  resetAt?: string;
+  error?: string;
+  sql?: string;
+  deleted: DeleteResult[];
+}> {
+  const saved = await saveCountReset(scope);
+  if (!saved.ok) {
+    return { ok: false, error: saved.error, sql: saved.sql, deleted: [] };
+  }
+
+  const aliases = aliasesForReset(scope);
+  let deleted: DeleteResult[] = [];
+  try {
+    deleted = await Promise.all([
+      deleteMatchingRows("analytics_events", ["app_id", "app_name"], aliases),
+      deleteMatchingRows("app_logs", ["app_name", "app_id"], aliases),
+      resetProfileCredits(aliases),
+    ]);
+  } catch (err) {
+    deleted = [
+      {
+        table: "reset_deletes",
+        deleted: 0,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    ];
+  }
+
+  return {
+    ok: true,
+    resetAt: saved.resetAt,
+    deleted,
+  };
 }

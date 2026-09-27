@@ -15,6 +15,9 @@ create table if not exists public.system_settings (
 
 alter table if exists public.system_settings enable row level security;
 grant select, insert, update on public.system_settings to service_role;
+grant select, insert, update, delete on public.analytics_events to service_role;
+grant select, insert, update, delete on public.app_logs to service_role;
+grant select, update on public.users_profiles to service_role;
 
 -- 会員の正は users_profiles（app_name / membership_status）。
 -- ダッシュボードは app_id 列が無いため app_name を製品 ID として集計する。

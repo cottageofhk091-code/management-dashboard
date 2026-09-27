@@ -195,6 +195,8 @@ function pickCount(
   map: CountResetMap,
   view: string,
 ) {
+  const reset = effectiveResetAt(map, view === "all" ? "all" : view);
+  if (reset) return fromRows;
   if (view === "all" && Object.keys(map.byApp).length > 0) return fromRows;
   return Math.max(fromRows, fromDb);
 }
@@ -567,6 +569,7 @@ export async function getAnalyticsDashboard(options: {
   );
 
   const aliasList = aliases;
+  const resetIso = laterIso(null, viewReset);
   const todayIso = todayBound.toISOString();
   const rangeIso = laterIso(rangeStart ? rangeStart.toISOString() : null, viewReset);
 
@@ -600,6 +603,7 @@ export async function getAnalyticsDashboard(options: {
     countExact("analytics_events", {
       appColumns: ["app_id", "app_name"],
       aliases: aliasList,
+      gteCreatedAt: resetIso,
       ...generateFilter,
     }),
     countExact("analytics_events", {
@@ -617,6 +621,7 @@ export async function getAnalyticsDashboard(options: {
     countExact("app_logs", {
       appColumns: ["app_name", "app_id"],
       aliases: aliasList,
+      gteCreatedAt: resetIso,
       ...generateLogFilter,
     }),
     countExact("app_logs", {
@@ -634,6 +639,7 @@ export async function getAnalyticsDashboard(options: {
     countExact("users_profiles", {
       appColumns: ["app_name", "app_id"],
       aliases: aliasList,
+      gteCreatedAt: resetIso,
       inFilter: { column: "membership_status", values: FREE_PLAN_VALUES },
     }),
     countExact("users_profiles", {
@@ -651,6 +657,7 @@ export async function getAnalyticsDashboard(options: {
     countExact("users_profiles", {
       appColumns: ["app_name", "app_id"],
       aliases: aliasList,
+      gteCreatedAt: resetIso,
       inFilter: { column: "membership_status", values: PRO_PLAN_VALUES },
     }),
     countExact("users_profiles", {
@@ -668,6 +675,7 @@ export async function getAnalyticsDashboard(options: {
     countExact("analytics_events", {
       appColumns: ["app_id", "app_name"],
       aliases: aliasList,
+      gteCreatedAt: resetIso,
       inFilter: { column: "event_type", values: SIGNUP_EVENT_TYPES },
     }),
     countExact("analytics_events", {
@@ -685,6 +693,7 @@ export async function getAnalyticsDashboard(options: {
     countExact("analytics_events", {
       appColumns: ["app_id", "app_name"],
       aliases: aliasList,
+      gteCreatedAt: resetIso,
       inFilter: { column: "event_type", values: PAID_EVENT_TYPES },
     }),
     countExact("analytics_events", {

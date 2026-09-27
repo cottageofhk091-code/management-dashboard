@@ -87,6 +87,13 @@ export function aliasesForApp(appId: string | "all"): string[] | null {
   return product ? [...product.aliases] : [appId];
 }
 
+export function aliasesForReset(scope: string | "all"): string[] | null {
+  if (scope === "all") return null;
+  const product = findProduct(scope);
+  if (!product) return [scope];
+  return [...new Set([product.id, ...product.aliases])];
+}
+
 export function isKnownProductId(value: string): value is ProductId {
   return Boolean(findProduct(value));
 }

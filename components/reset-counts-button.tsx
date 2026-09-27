@@ -72,6 +72,8 @@ export function ResetCountsButton({
       setConfirmText("");
       setAcknowledged(false);
       router.refresh();
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+      router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "リセットに失敗しました。");
     } finally {
@@ -106,7 +108,8 @@ export function ResetCountsButton({
             </h2>
             <p className="mt-3 text-sm leading-6 text-zinc-600">{message}</p>
             <p className="mt-2 text-xs text-zinc-400">
-              生データは残し、この時刻以降の集計だけを表示します。
+              分析ログ（analytics_events / app_logs）は対象分を削除し、会員数は reset_at
+              以降のみ集計します。
             </p>
 
             <label className="mt-4 flex items-start gap-2 text-sm text-zinc-700">

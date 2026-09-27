@@ -1,9 +1,18 @@
+import { revalidatePath, revalidateTag } from "next/cache";
 import { connection } from "next/server";
-import { RESET_CONFIRM_TEXT, resolveResetScope, saveCountReset } from "@/lib/count-reset";
+import { RESET_CONFIRM_TEXT, executeCountReset, resolveResetScope } from "@/lib/count-reset";
 import { isSupabaseAdminConfigured } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+
+function bustDashboardCache() {
+  revalidatePath("/dashboard");
+  revalidatePath("/", "layout");
+  revalidatePath("/");
+  revalidatePath("/admin");
+  revalidateTag("dashboard-metrics", { expire: 0 });
+}
 
 export async function POST(request: Request) {
   await connection();
@@ -34,14 +43,24 @@ export async function POST(request: Request) {
     return Response.json({ ok: false, error: "app_id が不正です。" }, { status: 400 });
   }
 
-  const result = await saveCountReset(scope);
+  const result = await executeCountReset(scope);
   if (!result.ok) {
     return Response.json(result, { status: 500 });
   }
 
-  return Response.json({
-    ok: true,
-    app_id: scope,
-    reset_at: result.resetAt,
-  });
+  bustDashboardCache();
+
+  return Response.json(
+    {
+      ok: true,
+      app_id: scope,
+      reset_at: result.resetAt,
+      deleted: result.deleted,
+    },
+    {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+      },
+    },
+  );
 }
