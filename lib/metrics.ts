@@ -441,7 +441,7 @@ export async function getAnalyticsDashboard(options: {
   period: PeriodKey;
 }): Promise<AnalyticsDashboard> {
   const empty: AnalyticsDashboard = {
-    configured: isSupabaseAdminConfigured,
+    configured: isSupabaseAdminConfigured(),
     error: null,
     kpis: {
       visits: { today: 0, total: 0, period: 0 },
@@ -482,7 +482,7 @@ export async function getAnalyticsDashboard(options: {
     options.app === "all" ? "all" : options.app,
   );
 
-  if (!isSupabaseAdminConfigured) {
+  if (!isSupabaseAdminConfigured()) {
     return {
       ...empty,
       error: JSON.stringify(

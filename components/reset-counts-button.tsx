@@ -62,10 +62,21 @@ export function ResetCountsButton({
         }),
       });
       const json = (await res.json().catch(() => null)) as
-        | { ok?: boolean; error?: string }
+        | {
+            ok?: boolean;
+            error?: string;
+            sql?: string;
+            deleted?: { table?: string; error?: string | null }[];
+          }
         | null;
+      const mutationErrors = (json?.deleted ?? [])
+        .filter((row) => row?.error)
+        .map((row) => `${row.table ?? "unknown"}: ${row.error}`);
+      const message = [json?.error, json?.sql, ...mutationErrors]
+        .filter(Boolean)
+        .join("\n");
       if (!res.ok || !json?.ok) {
-        setError(json?.error || `リセットに失敗しました（${res.status}）。`);
+        setError(message || `リセットに失敗しました（${res.status}）。`);
         return;
       }
       setOpen(false);
@@ -134,7 +145,9 @@ export function ResetCountsButton({
               />
             </label>
 
-            {error ? <p className="mt-3 text-sm text-rose-600">{error}</p> : null}
+            {error ? (
+              <p className="mt-3 whitespace-pre-wrap text-sm text-rose-600">{error}</p>
+            ) : null}
 
             <div className="mt-5 flex justify-end gap-2">
               <button

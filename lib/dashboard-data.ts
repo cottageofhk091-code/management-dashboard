@@ -46,7 +46,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     share: 0,
   }));
 
-  if (!isSupabaseAdminConfigured) {
+  if (!isSupabaseAdminConfigured()) {
     return {
       configured: false,
       error:
