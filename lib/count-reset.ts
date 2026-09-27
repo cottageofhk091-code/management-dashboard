@@ -7,8 +7,8 @@ import { aliasesForReset, canonicalAppId, findProduct, type ProductId } from "@/
 import {
   GLOBAL_RESET_SCOPE,
   RESET_KEY_PREFIX,
-  SETTINGS_INIT_MESSAGE,
   SETTINGS_INIT_SQL,
+  TABLE_GRANT_SQL,
 } from "@/lib/count-reset-shared";
 
 export {
@@ -190,9 +190,32 @@ function isIgnorableColumnError(message: string) {
   );
 }
 
-function shortError(error: { message?: string; code?: string } | null) {
+function logMutationError(
+  operation: string,
+  table: string,
+  error: { message?: string; details?: string; hint?: string; code?: string } | unknown,
+) {
+  const record =
+    error && typeof error === "object"
+      ? (error as { message?: string; details?: string; hint?: string; code?: string })
+      : { message: String(error) };
+  console.error(`[count-reset] ${operation} ${table} failed`, {
+    message: record.message ?? null,
+    details: record.details ?? null,
+    hint: record.hint ?? null,
+    code: record.code ?? null,
+  });
+}
+
+function describeTableError(table: string, operation: "削除" | "更新" | "保存", error: string | null) {
   if (!error) return null;
-  return error.message || error.code || null;
+  return `${table} の${operation}に失敗しました: ${error}`;
+}
+
+function shortError(error: { message?: string; code?: string; details?: string } | null) {
+  if (!error) return null;
+  if (error.message && error.details) return `${error.message} (${error.details})`;
+  return error.message || error.details || error.code || null;
 }
 
 function errorBlob(error: { message?: string; code?: string; details?: string; hint?: string } | null) {
@@ -241,7 +264,12 @@ export async function saveCountReset(
     }
 
     const blob = errorBlob(settings.error);
-    console.error("[count-reset] system_settings upsert failed:", settings.error);
+    console.error("[count-reset] system_settings upsert failed:", {
+      message: settings.error.message,
+      details: settings.error.details,
+      hint: settings.error.hint,
+      code: settings.error.code,
+    });
     if (isMissingTable(blob)) {
       settingsMissing = true;
     }
@@ -257,7 +285,7 @@ export async function saveCountReset(
       metadata: { scope, reset_at: resetAt },
     });
     if (eventInsert.error) {
-      console.error("[count-reset] analytics_events reset insert failed:", eventInsert.error);
+      logMutationError("INSERT", "analytics_events", eventInsert.error);
     }
   } catch (err) {
     console.error("[count-reset] analytics_events reset insert threw:", err);
@@ -290,7 +318,7 @@ async function deleteMatchingRows(
         .delete({ count: "exact" })
         .gte("created_at", "1970-01-01T00:00:00.000Z");
       if (error) {
-        console.error(`[count-reset] DELETE ${table}`, error);
+        logMutationError("DELETE", table, error);
         if (isMissingTable(errorBlob(error))) {
           return { table, deleted: 0, error: shortError(error) };
         }
@@ -310,7 +338,7 @@ async function deleteMatchingRows(
         .delete({ count: "exact" })
         .in(column, aliases);
       if (error) {
-        console.error(`[count-reset] DELETE ${table}.${column}`, error);
+        logMutationError("DELETE", `${table}.${column}`, error);
         const blob = errorBlob(error);
         if (isIgnorableColumnError(blob)) {
           continue;
@@ -322,7 +350,7 @@ async function deleteMatchingRows(
     }
     return { table, deleted, error: lastError };
   } catch (err) {
-    console.error(`[count-reset] DELETE ${table} threw:`, err);
+    logMutationError("DELETE", table, err);
     return {
       table,
       deleted: 0,
@@ -352,7 +380,7 @@ async function resetProfileCredits(
       if (!error) {
         return { table: "users_profiles", deleted: count ?? null, error: null };
       }
-      console.error("[count-reset] UPDATE users_profiles", error);
+      logMutationError("UPDATE", "users_profiles", error);
       const blob = errorBlob(error);
       lastError = shortError(error);
       if (isMissingTable(blob) || isIgnorableColumnError(blob)) {
@@ -369,7 +397,7 @@ async function resetProfileCredits(
       if (!retry.error) {
         return { table: "users_profiles", deleted: retry.count ?? null, error: null };
       }
-      console.error("[count-reset] UPDATE users_profiles app_id", retry.error);
+      logMutationError("UPDATE", "users_profiles.app_id", retry.error);
       lastError = shortError(retry.error);
       if (isMissingTable(errorBlob(retry.error))) {
         return { table: "users_profiles", deleted: 0, error: null };
@@ -381,8 +409,25 @@ async function resetProfileCredits(
     }
     return { table: "users_profiles", deleted: 0, error: lastError };
   } catch (err) {
-    console.error("[count-reset] UPDATE users_profiles threw:", err);
+    logMutationError("UPDATE", "users_profiles", err);
     return { table: "users_profiles", deleted: 0, error: null };
+  }
+}
+
+async function runIsolated(
+  table: string,
+  operation: "削除" | "更新",
+  fn: () => Promise<DeleteResult>,
+): Promise<DeleteResult> {
+  try {
+    return await fn();
+  } catch (err) {
+    logMutationError(operation, table, err);
+    return {
+      table,
+      deleted: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -402,7 +447,7 @@ export async function executeCountReset(
   try {
     saved = await saveCountReset(scope, client);
   } catch (err) {
-    console.error("[count-reset] saveCountReset threw:", err);
+    logMutationError("UPSERT", "system_settings", err);
     saved = {
       ok: true,
       resetAt: new Date().toISOString(),
@@ -415,23 +460,41 @@ export async function executeCountReset(
   }
 
   const aliases = aliasesForReset(scope);
-  let deleted: DeleteResult[] = [];
-  try {
-    deleted = await Promise.all([
+  const deleted: DeleteResult[] = [
+    await runIsolated("analytics_events", "削除", () =>
       deleteMatchingRows(client, "analytics_events", ["app_id", "app_name"], aliases),
+    ),
+    await runIsolated("app_logs", "削除", () =>
       deleteMatchingRows(client, "app_logs", ["app_name", "app_id"], aliases),
-      resetProfileCredits(client, aliases),
-    ]);
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    console.error("[count-reset] mutation threw:", err);
-    deleted = [{ table: "reset_deletes", deleted: 0, error }];
-  }
+    ),
+    await runIsolated("users_profiles", "更新", () => resetProfileCredits(client, aliases)),
+  ];
 
-  const logErrors = deleted.filter(
-    (row) => row.table !== "users_profiles" && row.error && !isMissingTable(row.error),
+  const failed = deleted
+    .filter((row) => row.error && !isMissingTable(row.error))
+    .map((row) =>
+      describeTableError(
+        row.table,
+        row.table === "users_profiles" ? "更新" : "削除",
+        row.error,
+      ),
+    )
+    .filter((line): line is string => Boolean(line));
+
+  const logFailed = deleted.filter(
+    (row) =>
+      (row.table === "analytics_events" || row.table === "app_logs") &&
+      row.error &&
+      !isMissingTable(row.error),
   );
-  if (logErrors.length === 0) {
+  const anyLogDeleted = deleted.some(
+    (row) =>
+      (row.table === "analytics_events" || row.table === "app_logs") &&
+      !row.error &&
+      (row.deleted ?? 0) >= 0,
+  );
+
+  if (logFailed.length === 0) {
     return {
       ok: true,
       resetAt: saved.resetAt,
@@ -439,31 +502,30 @@ export async function executeCountReset(
     };
   }
 
-  if (logErrors.some((row) => /permission denied|42501/i.test(row.error ?? ""))) {
+  // reset_at 保存済み、またはいずれかのログ削除が成功していればカウントは落とせる
+  if (!saved.settingsMissing || anyLogDeleted) {
     return {
-      ok: false,
+      ok: true,
       resetAt: saved.resetAt,
-      error: "データの削除に失敗しました。service_role に DELETE / UPDATE 権限があるか確認してください。",
       deleted,
     };
   }
 
-  if (saved.settingsMissing || logErrors.some((row) => isMissingTable(row.error ?? ""))) {
-    return {
-      ok: false,
-      resetAt: saved.resetAt,
-      code: "SETTINGS_TABLE_MISSING",
-      error: SETTINGS_INIT_MESSAGE,
-      hint: "Supabase で SQL を実行してください",
-      sql: SETTINGS_INIT_SQL,
-      deleted,
-    };
-  }
+  const hasPermissionError = logFailed.some((row) =>
+    /permission denied|42501/i.test(row.error ?? ""),
+  );
 
   return {
     ok: false,
     resetAt: saved.resetAt,
-    error: "リセットに失敗しました。",
+    error: failed.join("\n"),
+    hint: hasPermissionError
+      ? "Supabase の SQL Editor で GRANT を実行してください"
+      : saved.settingsMissing
+        ? "Supabase で SQL を実行してください"
+        : undefined,
+    sql: hasPermissionError ? TABLE_GRANT_SQL : saved.settingsMissing ? SETTINGS_INIT_SQL : undefined,
+    code: saved.settingsMissing && !hasPermissionError ? "SETTINGS_TABLE_MISSING" : undefined,
     deleted,
   };
 }

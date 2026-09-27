@@ -13,6 +13,10 @@ grant select, insert, update on public.system_settings to service_role;`;
 export const SETTINGS_INIT_MESSAGE =
   "データベースの初期化が必要です。Supabase の SQL Editor で次の SQL を実行してください。";
 
+export const TABLE_GRANT_SQL = `grant select, insert, update, delete on public.analytics_events to service_role;
+grant select, insert, update, delete on public.app_logs to service_role;
+grant select, update on public.users_profiles to service_role;`;
+
 function looksLikeJsonBlob(value: string) {
   const trimmed = value.trim();
   return trimmed.startsWith("{") || trimmed.startsWith("[");
@@ -50,6 +54,15 @@ export function formatResetErrorForUi(input: {
   const raw = [input.error, input.hint, input.code].filter(Boolean).join("\n");
   const text = extractErrorText(input.error ?? "") || raw;
 
+  if (/の削除に失敗|の更新に失敗|の保存に失敗/.test(text)) {
+    if (/permission denied|42501/i.test(text)) {
+      return [text, "Supabase の SQL Editor で次の GRANT を実行してください。", input.sql || TABLE_GRANT_SQL]
+        .filter(Boolean)
+        .join("\n\n");
+    }
+    return text;
+  }
+
   if (
     input.code === "SETTINGS_TABLE_MISSING" ||
     /PGRST205|system_settings/i.test(`${text}\n${raw}`)
@@ -62,7 +75,11 @@ export function formatResetErrorForUi(input: {
   }
 
   if (/permission denied|42501/i.test(text)) {
-    return "データの削除に失敗しました。service_role に DELETE / UPDATE 権限があるか確認してください。";
+    return [
+      text || "データの削除に失敗しました。",
+      "Supabase の SQL Editor で次の GRANT を実行してください。",
+      input.sql || TABLE_GRANT_SQL,
+    ].join("\n\n");
   }
 
   if (text && !looksLikeJsonBlob(text)) return text;

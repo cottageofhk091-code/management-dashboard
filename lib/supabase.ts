@@ -18,11 +18,26 @@ function supabaseAnonKey() {
   return env("NEXT_PUBLIC_SUPABASE_ANON_KEY");
 }
 
+function jwtRole(key: string): string | null {
+  if (!key.startsWith("eyJ")) return null;
+  try {
+    const payloadPart = key.split(".")[1];
+    if (!payloadPart) return null;
+    const json = Buffer.from(payloadPart, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { role?: unknown };
+    return typeof payload.role === "string" ? payload.role : null;
+  } catch {
+    return null;
+  }
+}
+
 /** service_role / secret のみ。publishable / anon は使わない。 */
 export function resolveServiceRoleKey(): string | null {
   const key = env("SUPABASE_SERVICE_ROLE_KEY") || env("SUPABASE_SECRET_KEY");
   if (!key) return null;
   if (key.startsWith("sb_publishable_")) return null;
+  const role = jwtRole(key);
+  if (role && role !== "service_role") return null;
   return key;
 }
 
@@ -44,6 +59,7 @@ export function describeSupabaseDebug() {
     adminConfigured: isSupabaseAdminConfigured(),
     hasServiceRoleEnv: Boolean(env("SUPABASE_SERVICE_ROLE_KEY")),
     hasSecretKeyEnv: Boolean(env("SUPABASE_SECRET_KEY")),
+    jwtRole: jwtRole(key),
     keyKind,
     keyLength: key.length,
   };
@@ -63,8 +79,15 @@ let adminClientKey = "";
 
 function buildServiceRoleClient(url: string, key: string): SupabaseClient {
   return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { fetch: noStoreFetch },
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    db: { schema: "public" },
+    global: {
+      fetch: noStoreFetch,
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+      },
+    },
   });
 }
 

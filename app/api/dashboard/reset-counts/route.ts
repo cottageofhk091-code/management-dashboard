@@ -4,6 +4,7 @@ import { RESET_CONFIRM_TEXT, executeCountReset, resolveResetScope } from "@/lib/
 import {
   MISSING_SERVICE_ROLE_ERROR,
   createServiceRoleClient,
+  describeSupabaseDebug,
 } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
@@ -28,12 +29,13 @@ export async function POST(request: Request) {
 
   const admin = createServiceRoleClient();
   if (!admin) {
-    console.error(MISSING_SERVICE_ROLE_ERROR);
+    console.error(MISSING_SERVICE_ROLE_ERROR, describeSupabaseDebug());
     return Response.json(
       { ok: false, error: MISSING_SERVICE_ROLE_ERROR },
       { status: 500, headers: noStoreHeaders },
     );
   }
+  console.info("[reset-counts] admin client", describeSupabaseDebug());
 
   let body: { app_id?: unknown; confirm?: unknown };
   try {
