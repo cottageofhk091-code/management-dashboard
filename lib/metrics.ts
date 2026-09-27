@@ -1,4 +1,4 @@
-import { aliasesForApp, PRODUCTS, PRO_PRICE_YEN } from "@/lib/products";
+import { aliasesForApp, findProduct, PRODUCTS, PRO_PRICE_YEN } from "@/lib/products";
 import {
   enumerateDays,
   jstYmd,
@@ -73,6 +73,23 @@ const OTHER_SOURCE = { name: "他", color: "#a1a1aa" };
 const PAGE_SIZE = 1000;
 const MAX_ROWS = 20000;
 
+/** 分析・生成として数える analytics_events.event_type / app_logs.action_type */
+const GENERATE_EVENT_TYPES = [
+  "generate",
+  "analysis_executed",
+  "analyze",
+  "analyze_car",
+  "analyze_item",
+  "analyze_property",
+  "generate_apology",
+  "search_subsidy",
+];
+
+const SIGNUP_EVENT_TYPES = ["signup"];
+const PAID_EVENT_TYPES = ["subscription_created", "paid_signup"];
+const FREE_PLAN_VALUES = ["free"];
+const PRO_PLAN_VALUES = ["pro", "premium", "paid", "monthly", "active"];
+
 type Row = Record<string, unknown>;
 
 function str(row: Row, ...keys: string[]) {
@@ -91,7 +108,13 @@ function rowDate(row: Row) {
 }
 
 function rowAppId(row: Row) {
-  return str(row, "app_id", "app_name", "app");
+  const candidates = [str(row, "app_id"), str(row, "app_name"), str(row, "app")].filter(
+    Boolean,
+  );
+  for (const candidate of candidates) {
+    if (findProduct(candidate)) return candidate;
+  }
+  return candidates[0] ?? "";
 }
 
 function matchesApp(row: Row, aliases: string[] | null) {
@@ -156,17 +179,47 @@ function inRange(date: Date | null, start: Date | null, end?: Date) {
 
 function isProPlan(value: string) {
   const plan = value.toLowerCase();
-  return plan === "pro" || plan === "paid" || plan === "premium";
+  return PRO_PLAN_VALUES.includes(plan);
 }
 
 function isFreePlan(value: string) {
   const plan = value.toLowerCase();
-  return plan === "free" || plan === "" || plan === "null" || plan === "undefined";
+  return FREE_PLAN_VALUES.includes(plan) || plan === "" || plan === "null" || plan === "undefined";
+}
+
+function profilePlan(row: Row) {
+  return str(row, "plan", "plan_type", "membership_status", "user_status");
+}
+
+function normalizeProfile(row: Row): Row {
+  return {
+    ...row,
+    app_id: rowAppId(row),
+    plan: profilePlan(row) || "free",
+    user_id: str(row, "user_id", "id"),
+    free_pro_credits: row.free_pro_credits ?? row.free_credits,
+  };
+}
+
+function dedupeProfiles(rows: Row[]) {
+  const seen = new Set<string>();
+  const out: Row[] = [];
+  for (const row of rows) {
+    const key = `${rowAppId(row).toLowerCase()}|${str(row, "user_id", "id")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
 }
 
 function isAnalysisEvent(row: Row) {
   const type = str(row, "event_type", "action_type", "type").toLowerCase();
-  if (!type) return true;
+  if (!type) return false;
+  if (/signup|subscription_created|paid_signup|payment|visit|login/.test(type)) {
+    return false;
+  }
+  if (GENERATE_EVENT_TYPES.includes(type)) return true;
   return /analys|generat|search|diagnos|sold|listing/.test(type);
 }
 
@@ -241,9 +294,11 @@ function formatRawError(error: unknown) {
 async function countExact(
   table: string,
   options?: {
-    appColumn?: string;
+    appColumns?: string[];
     aliases?: string[] | null;
     gteCreatedAt?: string | null;
+    eq?: { column: string; value: string };
+    inFilter?: { column: string; values: string[] };
   },
 ): Promise<{ count: number; error: string | null }> {
   const client = getSupabaseAdmin();
@@ -251,19 +306,40 @@ async function countExact(
     return { count: 0, error: "SUPABASE_SERVICE_ROLE_KEY が未設定です。" };
   }
 
+  const appColumns =
+    options?.appColumns?.length ? options.appColumns : ["app_id", "app_name"];
+  const aliases = options?.aliases?.length ? options.aliases : null;
+  const columnsToTry = aliases ? appColumns : [null];
+
   try {
-    let query = client.from(table).select("*", { count: "exact", head: true });
-    if (options?.aliases?.length && options.appColumn) {
-      query = query.in(options.appColumn, options.aliases);
+    let lastError: string | null = null;
+    for (const appColumn of columnsToTry) {
+      let query = client.from(table).select("*", { count: "exact", head: true });
+      if (aliases && appColumn) {
+        query = query.in(appColumn, aliases);
+      }
+      if (options?.gteCreatedAt) {
+        query = query.gte("created_at", options.gteCreatedAt);
+      }
+      if (options?.eq) {
+        query = query.eq(options.eq.column, options.eq.value);
+      }
+      if (options?.inFilter?.values.length) {
+        query = query.in(options.inFilter.column, options.inFilter.values);
+      }
+      const { count, error } = await query;
+      if (!error) {
+        return { count: count ?? 0, error: null };
+      }
+      lastError = `[${table} count]\n${formatRawError(error)}`;
+      const msg = `${error.message ?? ""} ${error.details ?? ""}`;
+      const missingColumn =
+        /schema cache|does not exist|column|42703|PGRST204/i.test(msg);
+      if (!missingColumn || !appColumn) {
+        return { count: 0, error: lastError };
+      }
     }
-    if (options?.gteCreatedAt) {
-      query = query.gte("created_at", options.gteCreatedAt);
-    }
-    const { count, error } = await query;
-    if (error) {
-      return { count: 0, error: `[${table} count]\n${formatRawError(error)}` };
-    }
-    return { count: count ?? 0, error: null };
+    return { count: 0, error: lastError };
   } catch (err) {
     return { count: 0, error: `[${table} count thrown]\n${formatRawError(err)}` };
   }
@@ -398,16 +474,19 @@ export async function getAnalyticsDashboard(options: {
   let visitsRes;
   let logsRes;
   let eventsRes;
+  let usersProfilesRes;
   let profilesRes;
   let paymentLogsRes;
   try {
-    [visitsRes, logsRes, eventsRes, profilesRes, paymentLogsRes] = await Promise.all([
-      fetchAllRows("analytics_visits"),
-      fetchAllRows("app_logs"),
-      fetchAllRows("analytics_events"),
-      fetchAllRows("profiles"),
-      fetchAllRows("payment_logs"),
-    ]);
+    [visitsRes, logsRes, eventsRes, usersProfilesRes, profilesRes, paymentLogsRes] =
+      await Promise.all([
+        fetchAllRows("analytics_visits"),
+        fetchAllRows("app_logs"),
+        fetchAllRows("analytics_events"),
+        fetchAllRows("users_profiles"),
+        fetchAllRows("profiles"),
+        fetchAllRows("payment_logs"),
+      ]);
   } catch (err) {
     return {
       ...empty,
@@ -429,6 +508,7 @@ export async function getAnalyticsDashboard(options: {
     visitsRes.error,
     logsRes.error,
     eventsRes.error,
+    usersProfilesRes.error,
     profilesRes.error,
     paymentLogsRes.error,
   ].filter(Boolean);
@@ -440,53 +520,154 @@ export async function getAnalyticsDashboard(options: {
   ].filter((row) => matchesApp(row, aliases));
   const analyses = dedupeAnalysisRows(rawAnalyses);
 
-  // アプリに紐づく user_id（profiles に app_id が無くても帰属できるように）
   const attributedUserIds = new Set<string>();
   for (const row of [...visits, ...analyses]) {
     const uid = str(row, "user_id", "uid");
     if (uid) attributedUserIds.add(uid);
   }
 
-  const allProfiles = profilesRes.rows;
+  const allProfiles = dedupeProfiles([
+    ...usersProfilesRes.rows.map(normalizeProfile),
+    ...profilesRes.rows.map(normalizeProfile),
+  ]);
   const profiles = allProfiles.filter((row) =>
     matchesProfileApp(row, aliases, attributedUserIds),
   );
 
-  // DB COUNT(*) を優先（過去ログの全件集計）。取得行と突き合わせ、大きい方を採用
   const aliasList = aliases;
   const todayIso = todayStart.toISOString();
   const rangeIso = rangeStart ? rangeStart.toISOString() : null;
-  const [eventsTotal, eventsToday, eventsPeriod, logsTotal, logsToday, logsPeriod] =
-    await Promise.all([
-      countExact("analytics_events", {
-        appColumn: "app_id",
-        aliases: aliasList,
-      }),
-      countExact("analytics_events", {
-        appColumn: "app_id",
-        aliases: aliasList,
-        gteCreatedAt: todayIso,
-      }),
-      countExact("analytics_events", {
-        appColumn: "app_id",
-        aliases: aliasList,
-        gteCreatedAt: rangeIso,
-      }),
-      countExact("app_logs", {
-        appColumn: "app_name",
-        aliases: aliasList,
-      }),
-      countExact("app_logs", {
-        appColumn: "app_name",
-        aliases: aliasList,
-        gteCreatedAt: todayIso,
-      }),
-      countExact("app_logs", {
-        appColumn: "app_name",
-        aliases: aliasList,
-        gteCreatedAt: rangeIso,
-      }),
-    ]);
+
+  const generateFilter = {
+    inFilter: { column: "event_type", values: GENERATE_EVENT_TYPES },
+  };
+  const generateLogFilter = {
+    inFilter: { column: "action_type", values: GENERATE_EVENT_TYPES },
+  };
+
+  const [
+    eventsTotal,
+    eventsToday,
+    eventsPeriod,
+    logsTotal,
+    logsToday,
+    logsPeriod,
+    freeTotal,
+    freeToday,
+    freePeriod,
+    proTotal,
+    proToday,
+    proPeriod,
+    signupTotal,
+    signupToday,
+    signupPeriod,
+    paidEventTotal,
+    paidEventToday,
+    paidEventPeriod,
+  ] = await Promise.all([
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      ...generateFilter,
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      gteCreatedAt: todayIso,
+      ...generateFilter,
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      gteCreatedAt: rangeIso,
+      ...generateFilter,
+    }),
+    countExact("app_logs", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      ...generateLogFilter,
+    }),
+    countExact("app_logs", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      gteCreatedAt: todayIso,
+      ...generateLogFilter,
+    }),
+    countExact("app_logs", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      gteCreatedAt: rangeIso,
+      ...generateLogFilter,
+    }),
+    countExact("users_profiles", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      inFilter: { column: "membership_status", values: FREE_PLAN_VALUES },
+    }),
+    countExact("users_profiles", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      gteCreatedAt: todayIso,
+      inFilter: { column: "membership_status", values: FREE_PLAN_VALUES },
+    }),
+    countExact("users_profiles", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      gteCreatedAt: rangeIso,
+      inFilter: { column: "membership_status", values: FREE_PLAN_VALUES },
+    }),
+    countExact("users_profiles", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      inFilter: { column: "membership_status", values: PRO_PLAN_VALUES },
+    }),
+    countExact("users_profiles", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      gteCreatedAt: todayIso,
+      inFilter: { column: "membership_status", values: PRO_PLAN_VALUES },
+    }),
+    countExact("users_profiles", {
+      appColumns: ["app_name", "app_id"],
+      aliases: aliasList,
+      gteCreatedAt: rangeIso,
+      inFilter: { column: "membership_status", values: PRO_PLAN_VALUES },
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      inFilter: { column: "event_type", values: SIGNUP_EVENT_TYPES },
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      gteCreatedAt: todayIso,
+      inFilter: { column: "event_type", values: SIGNUP_EVENT_TYPES },
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      gteCreatedAt: rangeIso,
+      inFilter: { column: "event_type", values: SIGNUP_EVENT_TYPES },
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      inFilter: { column: "event_type", values: PAID_EVENT_TYPES },
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      gteCreatedAt: todayIso,
+      inFilter: { column: "event_type", values: PAID_EVENT_TYPES },
+    }),
+    countExact("analytics_events", {
+      appColumns: ["app_id", "app_name"],
+      aliases: aliasList,
+      gteCreatedAt: rangeIso,
+      inFilter: { column: "event_type", values: PAID_EVENT_TYPES },
+    }),
+  ]);
 
   const countErrors = [
     eventsTotal.error,
@@ -495,6 +676,18 @@ export async function getAnalyticsDashboard(options: {
     logsTotal.error,
     logsToday.error,
     logsPeriod.error,
+    freeTotal.error,
+    freeToday.error,
+    freePeriod.error,
+    proTotal.error,
+    proToday.error,
+    proPeriod.error,
+    signupTotal.error,
+    signupToday.error,
+    signupPeriod.error,
+    paidEventTotal.error,
+    paidEventToday.error,
+    paidEventPeriod.error,
   ].filter(Boolean);
 
   const errors = [...fetchErrors, ...countErrors];
@@ -502,7 +695,6 @@ export async function getAnalyticsDashboard(options: {
   const visitsKpi = countPair(visits, null, todayStart, rangeStart);
   const analysesFromRows = countPair(analyses, null, todayStart, rangeStart);
 
-  // ログ欠落時: free_credits 消費 / has_used_pro_trial から最低回数を補完
   const analysisUserIds = new Set(
     analyses.map((row) => str(row, "user_id", "uid")).filter(Boolean),
   );
@@ -530,24 +722,35 @@ export async function getAnalyticsDashboard(options: {
   const analysesKpi: KpiPair = {
     today: Math.max(
       analysesFromRows.today + fallbackToday,
-      Math.max(eventsToday.count || 0, logsToday.count || 0),
+      (eventsToday.count || 0) + (logsToday.count || 0),
     ),
     total: Math.max(
       analysesFromRows.total + fallbackTotal,
-      Math.max(eventsTotal.count || 0, logsTotal.count || 0),
+      (eventsTotal.count || 0) + (logsTotal.count || 0),
     ),
     period: Math.max(
       analysesFromRows.period + fallbackPeriod,
-      Math.max(eventsPeriod.count || 0, logsPeriod.count || 0),
+      (eventsPeriod.count || 0) + (logsPeriod.count || 0),
     ),
   };
 
-  const freeKpi = countPair(profiles, null, todayStart, rangeStart, (row) =>
-    isFreePlan(str(row, "plan_type", "plan")),
+  const freeFromRows = countPair(profiles, null, todayStart, rangeStart, (row) =>
+    isFreePlan(profilePlan(row)),
   );
-  const proKpi = countPair(profiles, null, todayStart, rangeStart, (row) =>
-    isProPlan(str(row, "plan_type", "plan")),
+  const proFromRows = countPair(profiles, null, todayStart, rangeStart, (row) =>
+    isProPlan(profilePlan(row)),
   );
+
+  const freeKpi: KpiPair = {
+    today: Math.max(freeFromRows.today, freeToday.count || 0, signupToday.count || 0),
+    total: Math.max(freeFromRows.total, freeTotal.count || 0, signupTotal.count || 0),
+    period: Math.max(freeFromRows.period, freePeriod.count || 0, signupPeriod.count || 0),
+  };
+  const proKpi: KpiPair = {
+    today: Math.max(proFromRows.today, proToday.count || 0, paidEventToday.count || 0),
+    total: Math.max(proFromRows.total, proTotal.count || 0, paidEventTotal.count || 0),
+    period: Math.max(proFromRows.period, proPeriod.count || 0, paidEventPeriod.count || 0),
+  };
 
   const paymentLogs = paymentLogsRes.rows.filter(
     (row) => matchesApp(row, aliases) && isSuccessfulPayment(row),
@@ -671,10 +874,10 @@ export async function getAnalyticsDashboard(options: {
         inRange(rowDate(row), rangeStart),
     );
     const freeMembers = productProfiles.filter((row) =>
-      isFreePlan(str(row, "plan_type", "plan")),
+      isFreePlan(profilePlan(row)),
     ).length;
     const proMembers = productProfiles.filter((row) =>
-      isProPlan(str(row, "plan_type", "plan")),
+      isProPlan(profilePlan(row)),
     ).length;
     const productPayments = paymentLogsRes.rows.filter(
       (row) =>

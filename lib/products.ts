@@ -9,25 +9,38 @@ export const PRODUCTS = [
     id: "complaint-converter",
     name: "スマートお詫びコンシェルジュ",
     color: "#6366f1",
-    aliases: ["complaint-converter", "apology"],
+    aliases: ["complaint-converter", "apology", "complaint_converter"],
   },
   {
     id: "kuruma-to-mikata",
     name: "クルマとミカタ",
     color: "#10b981",
-    aliases: ["kuruma-to-mikata", "car"],
+    aliases: ["kuruma-to-mikata", "car", "kuruma_to_mikata"],
   },
   {
     id: "hojyokin-meister-1",
     name: "補助金マイスター",
     color: "#3b82f6",
-    aliases: ["hojyokin-meister-1", "subsidy"],
+    aliases: [
+      "hojyokin-meister-1",
+      "hojyokin_meister",
+      "hojyokin-meister",
+      "hojyokin_meister_1",
+      "subsidy",
+    ],
   },
   {
     id: "fleama-maker",
     name: "フリマアプリ商品説明生成",
     color: "#f59e0b",
-    aliases: ["fleama-maker", "furima_sold", "fleamarket", "fleama-sold"],
+    aliases: [
+      "fleama-maker",
+      "furima_sold",
+      "fleamarket",
+      "fleama-sold",
+      "fleama_sold",
+      "fleama_maker",
+    ],
   },
 ] as const;
 

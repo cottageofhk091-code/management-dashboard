@@ -7,6 +7,9 @@ alter table if exists public.analytics_events enable row level security;
 alter table if exists public.profiles enable row level security;
 alter table if exists public.app_logs enable row level security;
 
+-- 会員の正は users_profiles（app_name / membership_status）。
+-- ダッシュボードは app_id 列が無いため app_name を製品 ID として集計する。
+
 drop policy if exists "Allow anon select analytics_visits" on public.analytics_visits;
 create policy "Allow anon select analytics_visits"
   on public.analytics_visits for select to anon using (true);

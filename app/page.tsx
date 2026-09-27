@@ -136,7 +136,7 @@ export default async function Home({
               value={formatNumber(analytics.kpis.analyses.period)}
               today={formatNumber(analytics.kpis.analyses.today)}
               total={formatNumber(analytics.kpis.analyses.total)}
-              hint="analytics_events COUNT / app_logs / credits fallback"
+              hint="generate / app_logs / クレジット消費"
             />
             <KpiCard
               icon={<UserPlus className="h-5 w-5" />}
@@ -144,7 +144,7 @@ export default async function Home({
               value={formatNumber(analytics.kpis.freeMembers.period)}
               today={formatNumber(analytics.kpis.freeMembers.today)}
               total={formatNumber(analytics.kpis.freeMembers.total)}
-              hint="profiles（free）"
+              hint="users_profiles（plan/membership_status = free）"
             />
             <KpiCard
               icon={<Crown className="h-5 w-5" />}
@@ -152,7 +152,7 @@ export default async function Home({
               value={formatNumber(analytics.kpis.proMembers.period)}
               today={formatNumber(analytics.kpis.proMembers.today)}
               total={formatNumber(analytics.kpis.proMembers.total)}
-              hint="profiles（pro / paid）"
+              hint="users_profiles（pro / premium / paid）"
             />
             <KpiCard
               icon={<Banknote className="h-5 w-5" />}
