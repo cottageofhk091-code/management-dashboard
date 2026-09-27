@@ -60,7 +60,19 @@ export async function POST(request: Request) {
     );
   }
 
-  const result = await executeCountReset(scope, admin);
+  let result: Awaited<ReturnType<typeof executeCountReset>>;
+  try {
+    result = await executeCountReset(scope, admin);
+  } catch (err) {
+    console.error("[reset-counts] executeCountReset threw:", err);
+    return Response.json(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "リセット処理中にエラーが発生しました。",
+      },
+      { status: 500, headers: noStoreHeaders },
+    );
+  }
   if (result.resetAt) {
     bustDashboardCache();
   }

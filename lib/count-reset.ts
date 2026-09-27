@@ -7,12 +7,15 @@ import { aliasesForReset, canonicalAppId, findProduct, type ProductId } from "@/
 import {
   GLOBAL_RESET_SCOPE,
   RESET_KEY_PREFIX,
+  SETTINGS_INIT_MESSAGE,
+  SETTINGS_INIT_SQL,
 } from "@/lib/count-reset-shared";
 
 export {
   GLOBAL_RESET_SCOPE,
   RESET_KEY_PREFIX,
   RESET_CONFIRM_TEXT,
+  SETTINGS_INIT_SQL,
 } from "@/lib/count-reset-shared";
 
 export type CountResetMap = {
@@ -133,32 +136,40 @@ export async function getCountResetMap(): Promise<CountResetMap> {
 
   const map = emptyResetMap();
 
-  const settings = await client
-    .from(SETTINGS_TABLE)
-    .select("key, value")
-    .like("key", `${RESET_KEY_PREFIX}%`);
+  try {
+    const settings = await client
+      .from(SETTINGS_TABLE)
+      .select("key, value")
+      .like("key", `${RESET_KEY_PREFIX}%`);
 
-  if (!settings.error) {
-    for (const row of settings.data ?? []) {
-      const key = String(row.key ?? "");
-      applyReset(map, key.slice(RESET_KEY_PREFIX.length), parseResetDate(row.value));
+    if (!settings.error) {
+      for (const row of settings.data ?? []) {
+        const key = String(row.key ?? "");
+        applyReset(map, key.slice(RESET_KEY_PREFIX.length), parseResetDate(row.value));
+      }
+    } else if (!isMissingTable(`${settings.error.message} ${settings.error.code ?? ""}`)) {
+      console.error("[count-reset] load settings failed:", settings.error.message);
     }
-  } else if (!isMissingTable(`${settings.error.message} ${settings.error.code ?? ""}`)) {
-    console.error("[count-reset] load settings failed:", settings.error.message);
+  } catch (err) {
+    console.error("[count-reset] system_settings select threw:", err);
   }
 
-  const events = await client
-    .from("analytics_events")
-    .select("metadata, created_at")
-    .eq("app_id", FALLBACK_APP_ID)
-    .eq("event_type", FALLBACK_EVENT_TYPE);
+  try {
+    const events = await client
+      .from("analytics_events")
+      .select("metadata, created_at")
+      .eq("app_id", FALLBACK_APP_ID)
+      .eq("event_type", FALLBACK_EVENT_TYPE);
 
-  if (!events.error) {
-    for (const row of events.data ?? []) {
-      const metadata = (row.metadata ?? {}) as { scope?: string; reset_at?: string };
-      const scope = metadata.scope || GLOBAL_RESET_SCOPE;
-      applyReset(map, scope, parseResetDate(metadata.reset_at) ?? parseResetDate(row.created_at));
+    if (!events.error) {
+      for (const row of events.data ?? []) {
+        const metadata = (row.metadata ?? {}) as { scope?: string; reset_at?: string };
+        const scope = metadata.scope || GLOBAL_RESET_SCOPE;
+        applyReset(map, scope, parseResetDate(metadata.reset_at) ?? parseResetDate(row.created_at));
+      }
     }
+  } catch (err) {
+    console.error("[count-reset] analytics_events reset select threw:", err);
   }
 
   const fileStore = await readFileResets();
@@ -169,36 +180,39 @@ export async function getCountResetMap(): Promise<CountResetMap> {
   return map;
 }
 
-const SETTINGS_SQL = `create table if not exists public.system_settings (
-  key text primary key,
-  value text not null,
-  updated_at timestamptz not null default now()
-);
-grant select, insert, update on public.system_settings to service_role;`;
-
 function allowEphemeralFileReset() {
   return process.env.VERCEL !== "1" && process.env.NODE_ENV !== "production";
 }
 
-function formatMutationError(table: string, error: { message?: string; code?: string; details?: string; hint?: string } | null) {
-  if (!error) return null;
-  return JSON.stringify({
-    table,
-    message: error.message ?? null,
-    code: error.code ?? null,
-    details: error.details ?? null,
-    hint: error.hint ?? null,
-  });
+function isIgnorableColumnError(message: string) {
+  return /PGRST204|42703|column .* does not exist|Could not find the .* column/i.test(
+    message,
+  );
 }
 
-function isIgnorableColumnError(message: string) {
-  return /schema cache|does not exist|column|42703|PGRST204/i.test(message);
+function shortError(error: { message?: string; code?: string } | null) {
+  if (!error) return null;
+  return error.message || error.code || null;
+}
+
+function errorBlob(error: { message?: string; code?: string; details?: string; hint?: string } | null) {
+  if (!error) return "";
+  return `${error.message ?? ""} ${error.code ?? ""} ${error.details ?? ""} ${error.hint ?? ""}`;
 }
 
 export async function saveCountReset(
   scope: "all" | ProductId,
   client?: SupabaseClient | null,
-): Promise<{ ok: true; resetAt: string } | { ok: false; error: string; sql?: string }> {
+): Promise<{
+  ok: true;
+  resetAt: string;
+  settingsMissing?: boolean;
+} | {
+  ok: false;
+  error: string;
+  sql?: string;
+  code?: string;
+}> {
   const admin = client ?? getSupabaseAdmin();
   if (!admin) {
     return { ok: false, error: "SUPABASE_SERVICE_ROLE_KEY is missing in production" };
@@ -211,50 +225,54 @@ export async function saveCountReset(
     updated_at: resetAt,
   };
 
-  const settings = await admin.from(SETTINGS_TABLE).upsert(row, { onConflict: "key" });
-  if (!settings.error) {
-    if (allowEphemeralFileReset()) {
-      try {
-        await writeFileReset(scope, resetAt);
-      } catch (fileErr) {
-        console.error("[count-reset] local file fallback failed:", fileErr);
+  let settingsMissing = false;
+
+  try {
+    const settings = await admin.from(SETTINGS_TABLE).upsert(row, { onConflict: "key" });
+    if (!settings.error) {
+      if (allowEphemeralFileReset()) {
+        try {
+          await writeFileReset(scope, resetAt);
+        } catch (fileErr) {
+          console.error("[count-reset] local file fallback failed:", fileErr);
+        }
       }
+      return { ok: true, resetAt };
     }
-    return { ok: true, resetAt };
+
+    const blob = errorBlob(settings.error);
+    console.error("[count-reset] system_settings upsert failed:", settings.error);
+    if (isMissingTable(blob)) {
+      settingsMissing = true;
+    }
+  } catch (err) {
+    console.error("[count-reset] system_settings upsert threw:", err);
+    settingsMissing = true;
   }
 
-  console.error("[count-reset] system_settings upsert failed:", settings.error);
-  let persisted = false;
-
-  const eventInsert = await admin.from("analytics_events").insert({
-    app_id: FALLBACK_APP_ID,
-    event_type: FALLBACK_EVENT_TYPE,
-    metadata: { scope, reset_at: resetAt },
-  });
-  if (!eventInsert.error) {
-    persisted = true;
-  } else {
-    console.error("[count-reset] analytics_events reset insert failed:", eventInsert.error);
+  try {
+    const eventInsert = await admin.from("analytics_events").insert({
+      app_id: FALLBACK_APP_ID,
+      event_type: FALLBACK_EVENT_TYPE,
+      metadata: { scope, reset_at: resetAt },
+    });
+    if (eventInsert.error) {
+      console.error("[count-reset] analytics_events reset insert failed:", eventInsert.error);
+    }
+  } catch (err) {
+    console.error("[count-reset] analytics_events reset insert threw:", err);
   }
 
   if (allowEphemeralFileReset()) {
     try {
       await writeFileReset(scope, resetAt);
-      persisted = true;
     } catch (fileErr) {
       console.error("[count-reset] local file fallback failed:", fileErr);
     }
   }
 
-  if (persisted) {
-    return { ok: true, resetAt };
-  }
-
-  return {
-    ok: false,
-    error: formatMutationError(SETTINGS_TABLE, settings.error) ?? settings.error.message,
-    sql: SETTINGS_SQL,
-  };
+  // system_settings が無くても DELETE フォールバックへ進む
+  return { ok: true, resetAt, settingsMissing };
 }
 
 export type DeleteResult = { table: string; deleted: number | null; error: string | null };
@@ -265,83 +283,107 @@ async function deleteMatchingRows(
   columns: string[],
   aliases: string[] | null,
 ): Promise<DeleteResult> {
-  if (!aliases) {
-    const { error, count } = await client
-      .from(table)
-      .delete({ count: "exact" })
-      .gte("created_at", "1970-01-01T00:00:00.000Z");
-    if (error) {
-      console.error(`[count-reset] DELETE ${table}`, error);
+  try {
+    if (!aliases) {
+      const { error, count } = await client
+        .from(table)
+        .delete({ count: "exact" })
+        .gte("created_at", "1970-01-01T00:00:00.000Z");
+      if (error) {
+        console.error(`[count-reset] DELETE ${table}`, error);
+        if (isMissingTable(errorBlob(error))) {
+          return { table, deleted: 0, error: shortError(error) };
+        }
+      }
+      return {
+        table,
+        deleted: count ?? null,
+        error: shortError(error),
+      };
     }
-    return {
-      table,
-      deleted: count ?? null,
-      error: formatMutationError(table, error),
-    };
-  }
 
-  let deleted = 0;
-  let lastError: string | null = null;
-  for (const column of columns) {
-    const { error, count } = await client
-      .from(table)
-      .delete({ count: "exact" })
-      .in(column, aliases);
-    if (error) {
-      const packed = formatMutationError(table, error);
-      console.error(`[count-reset] DELETE ${table}.${column}`, error);
-      if (isIgnorableColumnError(`${error.message} ${error.code ?? ""}`)) {
+    let deleted = 0;
+    let lastError: string | null = null;
+    for (const column of columns) {
+      const { error, count } = await client
+        .from(table)
+        .delete({ count: "exact" })
+        .in(column, aliases);
+      if (error) {
+        console.error(`[count-reset] DELETE ${table}.${column}`, error);
+        const blob = errorBlob(error);
+        if (isIgnorableColumnError(blob)) {
+          continue;
+        }
+        lastError = shortError(error);
         continue;
       }
-      lastError = packed;
-      continue;
+      deleted += count ?? 0;
     }
-    deleted += count ?? 0;
+    return { table, deleted, error: lastError };
+  } catch (err) {
+    console.error(`[count-reset] DELETE ${table} threw:`, err);
+    return {
+      table,
+      deleted: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
-  return { table, deleted, error: lastError };
 }
 
 async function resetProfileCredits(
   client: SupabaseClient,
   aliases: string[] | null,
 ): Promise<DeleteResult> {
-  const payloads: Record<string, unknown>[] = [
-    { free_pro_credits: 1, has_used_pro_trial: false, free_credits: 1 },
-    { free_pro_credits: 1, free_credits: 1 },
-    { free_pro_credits: 1 },
-  ];
+  try {
+    const payloads: Record<string, unknown>[] = [
+      { free_pro_credits: 1, has_used_pro_trial: false, free_credits: 1 },
+      { free_pro_credits: 1, free_credits: 1 },
+      { free_pro_credits: 1 },
+    ];
 
-  let lastError: string | null = null;
-  for (const payload of payloads) {
-    let query = client.from("users_profiles").update(payload, { count: "exact" });
-    query = aliases
-      ? query.in("app_name", aliases)
-      : query.gte("created_at", "1970-01-01T00:00:00.000Z");
-    const { error, count } = await query;
-    if (!error) {
-      return { table: "users_profiles", deleted: count ?? null, error: null };
+    let lastError: string | null = null;
+    for (const payload of payloads) {
+      let query = client.from("users_profiles").update(payload, { count: "exact" });
+      query = aliases
+        ? query.in("app_name", aliases)
+        : query.gte("created_at", "1970-01-01T00:00:00.000Z");
+      const { error, count } = await query;
+      if (!error) {
+        return { table: "users_profiles", deleted: count ?? null, error: null };
+      }
+      console.error("[count-reset] UPDATE users_profiles", error);
+      const blob = errorBlob(error);
+      lastError = shortError(error);
+      if (isMissingTable(blob) || isIgnorableColumnError(blob)) {
+        continue;
+      }
+      break;
     }
-    console.error("[count-reset] UPDATE users_profiles", error);
-    lastError = formatMutationError("users_profiles", error);
-    if (isIgnorableColumnError(`${error.message} ${error.code ?? ""}`)) {
-      continue;
+
+    if (aliases) {
+      const retry = await client
+        .from("users_profiles")
+        .update({ free_pro_credits: 1 }, { count: "exact" })
+        .in("app_id", aliases);
+      if (!retry.error) {
+        return { table: "users_profiles", deleted: retry.count ?? null, error: null };
+      }
+      console.error("[count-reset] UPDATE users_profiles app_id", retry.error);
+      lastError = shortError(retry.error);
+      if (isMissingTable(errorBlob(retry.error))) {
+        return { table: "users_profiles", deleted: 0, error: null };
+      }
     }
-    break;
+
+    if (lastError && isMissingTable(lastError)) {
+      return { table: "users_profiles", deleted: 0, error: null };
+    }
+    return { table: "users_profiles", deleted: 0, error: lastError };
+  } catch (err) {
+    console.error("[count-reset] UPDATE users_profiles threw:", err);
+    return { table: "users_profiles", deleted: 0, error: null };
   }
-
-  if (aliases) {
-    const retry = await client
-      .from("users_profiles")
-      .update({ free_pro_credits: 1 }, { count: "exact" })
-      .in("app_id", aliases);
-    if (!retry.error) {
-      return { table: "users_profiles", deleted: retry.count ?? null, error: null };
-    }
-    console.error("[count-reset] UPDATE users_profiles app_id", retry.error);
-    lastError = formatMutationError("users_profiles", retry.error);
-  }
-
-  return { table: "users_profiles", deleted: 0, error: lastError };
 }
 
 export async function executeCountReset(
@@ -351,12 +393,25 @@ export async function executeCountReset(
   ok: boolean;
   resetAt?: string;
   error?: string;
+  hint?: string;
   sql?: string;
+  code?: string;
   deleted: DeleteResult[];
 }> {
-  const saved = await saveCountReset(scope, client);
+  let saved: Awaited<ReturnType<typeof saveCountReset>>;
+  try {
+    saved = await saveCountReset(scope, client);
+  } catch (err) {
+    console.error("[count-reset] saveCountReset threw:", err);
+    saved = {
+      ok: true,
+      resetAt: new Date().toISOString(),
+      settingsMissing: true,
+    };
+  }
+
   if (!saved.ok) {
-    return { ok: false, error: saved.error, sql: saved.sql, deleted: [] };
+    return { ok: false, error: saved.error, sql: saved.sql, code: saved.code, deleted: [] };
   }
 
   const aliases = aliasesForReset(scope);
@@ -373,19 +428,42 @@ export async function executeCountReset(
     deleted = [{ table: "reset_deletes", deleted: 0, error }];
   }
 
-  const mutationErrors = deleted.filter((row) => row.error).map((row) => row.error as string);
-  if (mutationErrors.length > 0) {
+  const logErrors = deleted.filter(
+    (row) => row.table !== "users_profiles" && row.error && !isMissingTable(row.error),
+  );
+  if (logErrors.length === 0) {
+    return {
+      ok: true,
+      resetAt: saved.resetAt,
+      deleted,
+    };
+  }
+
+  if (logErrors.some((row) => /permission denied|42501/i.test(row.error ?? ""))) {
     return {
       ok: false,
       resetAt: saved.resetAt,
-      error: mutationErrors.join("\n"),
+      error: "データの削除に失敗しました。service_role に DELETE / UPDATE 権限があるか確認してください。",
+      deleted,
+    };
+  }
+
+  if (saved.settingsMissing || logErrors.some((row) => isMissingTable(row.error ?? ""))) {
+    return {
+      ok: false,
+      resetAt: saved.resetAt,
+      code: "SETTINGS_TABLE_MISSING",
+      error: SETTINGS_INIT_MESSAGE,
+      hint: "Supabase で SQL を実行してください",
+      sql: SETTINGS_INIT_SQL,
       deleted,
     };
   }
 
   return {
-    ok: true,
+    ok: false,
     resetAt: saved.resetAt,
+    error: "リセットに失敗しました。",
     deleted,
   };
 }

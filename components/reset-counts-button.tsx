@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useState } from "react";
-import { RESET_CONFIRM_TEXT } from "@/lib/count-reset-shared";
+import { formatResetErrorForUi, RESET_CONFIRM_TEXT } from "@/lib/count-reset-shared";
 
 export function ResetCountsButton({
   appId,
@@ -65,18 +65,21 @@ export function ResetCountsButton({
         | {
             ok?: boolean;
             error?: string;
+            hint?: string;
             sql?: string;
-            deleted?: { table?: string; error?: string | null }[];
+            code?: string;
           }
         | null;
-      const mutationErrors = (json?.deleted ?? [])
-        .filter((row) => row?.error)
-        .map((row) => `${row.table ?? "unknown"}: ${row.error}`);
-      const message = [json?.error, json?.sql, ...mutationErrors]
-        .filter(Boolean)
-        .join("\n");
       if (!res.ok || !json?.ok) {
-        setError(message || `リセットに失敗しました（${res.status}）。`);
+        setError(
+          formatResetErrorForUi({
+            error: json?.error,
+            hint: json?.hint,
+            sql: json?.sql,
+            code: json?.code,
+            status: res.status,
+          }),
+        );
         return;
       }
       setOpen(false);
